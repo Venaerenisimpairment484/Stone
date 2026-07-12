@@ -139,6 +139,7 @@ sudo apt install ./Stone-*.deb
 - Stone 是个人本地桌面应用，不是团队管理、计费或远程管理平台。
 - 模型测试会向上游发送一个真实的小请求，消耗额度，并可能产生厂商费用。
 - 导入 Codex / ChatGPT session 不会验证订阅等级；可用模型和后端权限以上游账号为准。
+- `v0.8.1` 修复了同一 ChatGPT Team 或共享工作区下多个成员的导入覆盖问题。如果旧版 Stone 曾用后导入成员替换前一个成员，请安装最新版后重新导入原始 JSON；Stone 数据库无法恢复已经被覆盖的凭据。重新创建的账号需要手动加入所需号池，并按需重新绑定代理。
 - Stone 不会扫描浏览器 Cookie，也不会自动导入 `~/.codex/auth.json`。没有 Refresh Token 的 session 在 Access Token 到期后需要重新导入。
 - Codex 额度图仅适用于 ChatGPT OAuth 账号，并从 Stone 首次获取到额度信息后开始积累数据。
 - 代理连通性检测会请求 `api.ipify.org`，失败时回退到 `icanhazip.com`，用于识别代理的公网出口 IP。

@@ -188,6 +188,9 @@ try {
       && !Object.hasOwn(proxy, 'password')
       && !JSON.stringify(withProxy).includes(proxyPasswordMarker),
     chatGptAccountImported: chatGptImport.importedAccountIds.length === 1
+      && chatGptImport.createdAccountIds.length === 1
+      && chatGptImport.createdAccountIds[0] === chatGptImport.importedAccountIds[0]
+      && chatGptImport.updatedAccountIds.length === 0
       && chatGptImport.snapshot.accounts.some((account) => account.id === chatGptImport.importedAccountIds[0]
         && account.credentialType === 'chatgpt-oauth'
         && !Object.hasOwn(account, 'credentialId'))

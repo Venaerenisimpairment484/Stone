@@ -18,7 +18,7 @@ body:
     attributes:
       label: Stone version / Stone 版本
       description: Find it in Settings or the application About row / 可在设置页底部查看
-      placeholder: "0.8.0"
+      placeholder: "0.8.1"
     validations:
       required: true
 

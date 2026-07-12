@@ -18,6 +18,7 @@ node_modules/
 
 # Local Stone state and imported account credentials
 /accents/
+/AINX_BATCH_*.zip
 /user-data/
 /userdata/
 /client-config-home/

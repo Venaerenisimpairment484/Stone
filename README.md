@@ -118,7 +118,7 @@ sudo apt install ./Stone-*.deb
 ### 2. Add Accounts and Start Routing
 
 > [!NOTE]
-> The `v0.8.0` interface currently uses Simplified Chinese. The English menu names below include their current Chinese labels so you can find each page.
+> The current interface uses Simplified Chinese. The English menu names below include their current Chinese labels so you can find each page.
 
 1. Open **Providers (供应商)**, confirm or add an upstream, then add an API key or access token. Use **Import ChatGPT account (导入 ChatGPT 账号)** for a Codex / ChatGPT OAuth session.
 2. Test the account connection, refresh its available models, and choose the models it may expose.
@@ -142,6 +142,7 @@ The default gateway address is `http://127.0.0.1:15721`. Manual connection value
 - Stone is a personal local desktop application, not a team-management, billing, or remote-administration platform.
 - A model test sends a real, small request to the upstream. It consumes quota and may incur provider charges.
 - Importing a Codex / ChatGPT session does not verify a subscription tier. Available models and backend access are determined by the upstream account.
+- `v0.8.1` fixes imports for multiple members of one ChatGPT Team or shared workspace. If an older Stone version replaced one imported member with another, install the latest release and reimport the original JSON; overwritten credentials cannot be recovered from Stone's database. Add newly recreated accounts back to the required pools and reassign their proxies when needed.
 - Stone does not scan browser cookies or automatically import `~/.codex/auth.json`. A session without a Refresh Token must be imported again after its Access Token expires.
 - Codex quota charts are available only for ChatGPT OAuth accounts and begin collecting data after Stone first receives quota information.
 - Proxy connectivity tests contact `api.ipify.org` and fall back to `icanhazip.com` to identify the proxy's public egress IP.

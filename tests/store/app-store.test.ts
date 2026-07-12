@@ -597,6 +597,82 @@ describe('AppStore', () => {
     expect(restarted.getSnapshot().accounts).toHaveLength(3)
   })
 
+  it('preserves a v0.8.0 account and pool binding when another workspace member is imported after restart', async () => {
+    const store = createStore()
+    await store.initialize()
+    const sharedAccountId = 'acct-legacy-shared-workspace'
+    const firstExpiresAt = Date.now() + 3_600_000
+    const firstAccessToken = chatGptAccessToken(
+      Math.floor(firstExpiresAt / 1000),
+      sharedAccountId,
+      'legacy-member-a'
+    )
+    const first = await store.importChatGptAccounts({
+      providerId: 'provider-openai',
+      content: JSON.stringify({
+        access_token: firstAccessToken,
+        refresh_token: 'legacy-refresh-a',
+        account_id: sharedAccountId,
+        email: 'legacy-member-a@example.com',
+        expired: new Date(firstExpiresAt).toISOString()
+      })
+    })
+    const firstAccountId = first.createdAccountIds[0]
+    await store.savePool({
+      name: 'Legacy workspace pool',
+      protocol: 'openai-responses',
+      strategy: 'priority',
+      accountIds: [firstAccountId],
+      stickySessions: false,
+      stickyTtlMinutes: 30,
+      maxRetries: 1
+    })
+
+    const credentialId = store.getRuntimeAccount(firstAccountId)!.credentialId
+    const legacyBundle = JSON.stringify({
+      accessToken: firstAccessToken,
+      refreshToken: 'legacy-refresh-a',
+      accountId: sharedAccountId,
+      email: 'legacy-member-a@example.com',
+      expiresAt: firstExpiresAt
+    })
+    await store.getStateRepository().update((state) => {
+      state.credentials[credentialId] = Buffer.from(`vault:${legacyBundle}`, 'utf8').toString('base64')
+    })
+    await store.close()
+
+    const restarted = createStore()
+    await restarted.initialize()
+    const secondExpiresAt = Date.now() + 7_200_000
+    const second = await restarted.importChatGptAccounts({
+      providerId: 'provider-openai',
+      content: JSON.stringify({
+        access_token: chatGptAccessToken(
+          Math.floor(secondExpiresAt / 1000),
+          sharedAccountId,
+          'legacy-member-b'
+        ),
+        refresh_token: 'legacy-refresh-b',
+        account_id: sharedAccountId,
+        email: 'legacy-member-b@example.com',
+        expired: new Date(secondExpiresAt).toISOString()
+      })
+    })
+
+    expect(second.createdAccountIds).toHaveLength(1)
+    expect(second.updatedAccountIds).toEqual([])
+    expect(second.snapshot.accounts).toHaveLength(2)
+    expect(second.snapshot.accounts.some((account) => account.id === firstAccountId)).toBe(true)
+    expect(second.snapshot.pools.find((pool) => pool.name === 'Legacy workspace pool')?.members)
+      .toEqual([{ accountId: firstAccountId, enabled: true }])
+    expect(restarted.getChatGptCredential(credentialId)).toMatchObject({
+      accessToken: firstAccessToken,
+      refreshToken: 'legacy-refresh-a',
+      accountId: sharedAccountId,
+      userId: 'legacy-member-a'
+    })
+  })
+
   it('allows OAuth accounts to bind a proxy and preserves the binding when reimported', async () => {
     const store = createStore()
     await store.initialize()
