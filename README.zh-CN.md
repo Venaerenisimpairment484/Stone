@@ -135,8 +135,8 @@ sudo apt install ./Stone-*.deb
 ## Star 趋势
 
 <p align="center">
-  <a href="https://www.star-history.com/#EasyCode-Obsidian/Stone&Date">
-    <img src="https://api.star-history.com/svg?repos=EasyCode-Obsidian/Stone&type=Date" alt="Stone Star 趋势图">
+  <a href="https://github.com/EasyCode-Obsidian/Stone/stargazers">
+    <img src="docs/star-history.svg" alt="Stone Star 趋势图">
   </a>
 </p>
 
