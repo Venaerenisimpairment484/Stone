@@ -9,22 +9,41 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><img src="https://img.shields.io/github/v/release/EasyCode-Obsidian/Stone?display_name=tag&sort=semver" alt="最新版本"></a>
+  <a href="https://github.com/EasyCode-Obsidian/Stone/actions/workflows/release.yml"><img src="https://github.com/EasyCode-Obsidian/Stone/actions/workflows/release.yml/badge.svg" alt="发布构建"></a>
+  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555" alt="Windows、macOS 与 Linux"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 许可证"></a>
   <a href="https://github.com/EasyCode-Obsidian/Stone/stargazers"><img src="https://img.shields.io/github/stars/EasyCode-Obsidian/Stone?style=flat&logo=github" alt="GitHub Stars"></a>
-  <img src="https://img.shields.io/badge/QQ_group-1061282900-12B7F5?logo=tencentqq&logoColor=white" alt="QQ群 1061282900">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/许可证-Apache--2.0-blue" alt="Apache-2.0 许可证"></a>
 </p>
 
 <p align="center">
-  <strong>在一个本地桌面应用里，管理你的 AI 账号、号池、代理和编程客户端。</strong>
+  <strong>面向个人用户的本地 AI 网关与编程客户端控制中心，支持 Windows、macOS 和 Linux。</strong>
 </p>
 
-Stone Desktop 是一个面向多厂商 AI 账号的本地控制中心。你可以添加不同厂商的账号，决定每个账号开放哪些模型，将账号组成号池，再让 Claude Code、Codex 或 Gemini CLI 通过同一个本地网关使用它们。
+<p align="center">
+  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><strong>下载最新版本</strong></a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#界面预览">界面预览</a> ·
+  <a href="SECURITY.md">安全说明</a>
+</p>
+
+Stone Desktop 把多厂商 AI 接入、模型路由、协议转换和编程客户端配置集中到一个本地应用中。你可以添加自己的上游，决定每个账号开放哪些模型，将兼容账号组成号池，再让 Claude Code、Codex 或 Gemini CLI 通过同一个本地网关使用它们。
 
 Stone 会根据模型支持情况、剩余额度、账号健康状态和号池策略，自动选择当前可用的账号。它还能在 OpenAI、Anthropic 和 Gemini 协议之间转换，因此客户端和上游号池不必使用相同的 API 格式。
 
+> Stone 仅用于你本人拥有或已获授权使用的凭据与订阅，不提供账号共享、账号转售、公共访问，也不提供绕过厂商限制的机制。
+
+<p align="center">
+  <img src="docs/media/stone-demo.gif" width="100%" alt="Stone Desktop 功能演示">
+</p>
+
+<p align="center">
+  <a href="docs/media/stone-demo.mp4">查看高清 MP4 演示</a>
+</p>
+
 ## 为什么使用 Stone
 
-- **数据留在本机。** 不需要部署服务器或远程控制服务。
+- **控制与持久化数据留在本机。** 不需要部署服务器或远程控制服务；凭据、Profile、账号元数据和历史记录保存在当前电脑上。
 - **统一管理所有账号。** 在一个桌面应用中管理官方厂商、兼容端点、API Key、Access Token 和 Codex / ChatGPT OAuth session。
 - **减少使用中断。** 号池可以自动重试、冷却异常账号、遵守额度限制，并切换到其他可用账号。
 - **哪个账号有模型，就用哪个账号。** 每个账号拥有独立的模型发现与开放列表，号池汇总成员账号能够提供的模型。
@@ -57,7 +76,7 @@ Claude Code / Codex / Gemini CLI
 | 编程客户端 | 检测和管理 Claude Code、Codex、Gemini CLI 配置 Profile，预览修改并恢复备份 |
 | 协议网关 | 接收 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini generateContent，并转换普通或流式请求，包括工具调用与用量信息 |
 | 本地记录 | 查看请求状态、延迟、Token 用量、账号健康事件和桌面通知，不保存请求或响应正文 |
-| 应用更新 | 启动后自动比对 GitHub Releases，也可在设置中手动检查；查看更新说明、忽略当前版本、下载进度并更新后重启 |
+| 应用更新 | 自动或手动比对 GitHub Releases，查看更新说明并忽略指定版本；Windows 安装版与 Linux AppImage 可在应用内下载并重启更新，其他安装形式会打开 Releases 手动替换 |
 
 ## 界面预览
 
@@ -73,7 +92,7 @@ Claude Code / Codex / Gemini CLI
 
 ### 1. 下载 Stone
 
-从 [GitHub Releases](../../releases) 下载适合当前平台的安装包及 `SHA256SUMS`。
+从 [GitHub Releases](https://github.com/EasyCode-Obsidian/Stone/releases/latest) 下载适合当前平台的安装包及 `SHA256SUMS`。
 
 | 平台 | 选择 |
 | --- | --- |
@@ -85,7 +104,7 @@ Claude Code / Codex / Gemini CLI
 
 当前 Windows 版本尚未签名，macOS 版本尚未经过 Apple 公证，系统可能显示“未知发布者”或首次启动警告。批准运行前，请先使用 `SHA256SUMS` 核对文件。
 
-从 `v0.7.1` 升级到 `v0.8.0` 需要手动下载安装一次，因为旧版本尚未包含在线更新组件。安装 `v0.8.0` 后，Windows 安装版与 Linux AppImage 可以在应用内下载后更新并重启；Windows Portable、Linux deb 与当前 macOS 版本会打开 Releases，由用户手动替换。
+如果从 `v0.7.1` 或更早版本直接升级，首次升级到 `v0.8.0` 或更高版本时需要手动下载安装一次，因为旧版本尚未包含在线更新组件。安装 `v0.8.0` 后，Windows 安装版与 Linux AppImage 可以在应用内下载后更新并重启；Windows Portable、Linux deb 与当前 macOS 版本会打开 Releases，由用户手动替换。
 
 Linux 可以直接运行 AppImage，或安装 deb：
 
@@ -130,7 +149,9 @@ sudo apt install ./Stone-*.deb
 
 ## 交流社区
 
-欢迎加入 QQ 群 **1061282900**，交流使用问题、建议和反馈。
+使用疑问和工作流交流可前往 [GitHub Discussions](https://github.com/EasyCode-Obsidian/Stone/discussions)，可复现的问题与功能建议请提交到 [GitHub Issues](https://github.com/EasyCode-Obsidian/Stone/issues)，疑似安全漏洞请使用 [Private Vulnerability Reporting](https://github.com/EasyCode-Obsidian/Stone/security/advisories/new)。分享诊断信息前请先阅读[安全政策](SECURITY.md)，切勿公开真实凭据或账号资料。
+
+中文交流也可加入 QQ 群 **1061282900**。社区不支持账号共享、账号交易或绕过厂商条款的相关讨论。
 
 ## Star 趋势
 

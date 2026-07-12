@@ -9,22 +9,41 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/EasyCode-Obsidian/Stone/stargazers"><img src="https://img.shields.io/github/stars/EasyCode-Obsidian/Stone?style=flat&logo=github" alt="GitHub stars"></a>
-  <img src="https://img.shields.io/badge/QQ_group-1061282900-12B7F5?logo=tencentqq&logoColor=white" alt="QQ group 1061282900">
+  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><img src="https://img.shields.io/github/v/release/EasyCode-Obsidian/Stone?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="https://github.com/EasyCode-Obsidian/Stone/actions/workflows/release.yml"><img src="https://github.com/EasyCode-Obsidian/Stone/actions/workflows/release.yml/badge.svg" alt="Release build"></a>
+  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555" alt="Windows, macOS, and Linux"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/EasyCode-Obsidian/Stone/stargazers"><img src="https://img.shields.io/github/stars/EasyCode-Obsidian/Stone?style=flat&logo=github" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
-  <strong>Your AI accounts, pools, proxies, and coding clients in one local desktop app.</strong>
+  <strong>A personal, local-first AI gateway and coding client control center for Windows, macOS, and Linux.</strong>
 </p>
 
-Stone Desktop is a local control center for multi-provider AI accounts. Add accounts from different providers, decide which models each account can expose, combine them into account pools, and connect Claude Code, Codex, or Gemini CLI through one local gateway.
+<p align="center">
+  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><strong>Download latest release</strong></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+Stone Desktop brings multi-provider AI access, model routing, protocol conversion, and coding client configuration into one local app. Add your providers, decide which models each account can expose, combine compatible accounts into pools, and connect Claude Code, Codex, or Gemini CLI through one local gateway.
 
 Stone selects an available account according to its model support, quota, health, and pool policy. It can also translate between OpenAI, Anthropic, and Gemini protocols, so a client and its upstream pool do not need to use the same API format.
 
+> Stone is intended for credentials and subscriptions that you own or are authorized to use. It does not provide account sharing, resale, public access, or mechanisms to bypass provider limits.
+
+<p align="center">
+  <img src="docs/media/stone-demo.gif" width="100%" alt="Stone Desktop product tour">
+</p>
+
+<p align="center">
+  <a href="docs/media/stone-demo.mp4">Watch the high-quality MP4 demo</a>
+</p>
+
 ## Why Stone
 
-- **Everything stays local.** No server deployment or remote control service is required.
+- **Local control and storage.** No server deployment or remote control service is required; credentials, profiles, account metadata, and history stay on this computer.
 - **One place for every account.** Manage official providers, compatible endpoints, API keys, access tokens, and Codex / ChatGPT OAuth sessions from one desktop app.
 - **Fewer interruptions.** Account pools can retry, cool down failing accounts, respect quota limits, and fail over to another usable account.
 - **Use the model where it is available.** Each account has its own discovered and exposed model list; pools combine the models provided by their members.
@@ -57,7 +76,7 @@ The client connects only to Stone's local address. Stone chooses a suitable acco
 | Coding clients | Detect and manage Claude Code, Codex, and Gemini CLI profiles; preview changes and restore backups |
 | Protocol gateway | Accept OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini generateContent; convert normal and streaming requests, including tool calls and usage |
 | Local visibility | Review request status, latency, token usage, account health events, and desktop notifications without storing request or response bodies |
-| Application updates | Compare the installed version with GitHub Releases at startup or on demand; review release notes, ignore a version, follow download progress, and restart into the update |
+| Application updates | Compare the installed version with GitHub Releases, review notes, and ignore a version; Windows setup and Linux AppImage builds can download and restart into updates, while other packages open Releases for manual replacement |
 
 ## Screenshots
 
@@ -73,7 +92,7 @@ The client connects only to Stone's local address. Stone chooses a suitable acco
 
 ### 1. Download Stone
 
-Download the package for your platform and `SHA256SUMS` from [GitHub Releases](../../releases).
+Download the package for your platform and `SHA256SUMS` from [GitHub Releases](https://github.com/EasyCode-Obsidian/Stone/releases/latest).
 
 | Platform | Choose |
 | --- | --- |
@@ -85,7 +104,7 @@ Download the package for your platform and `SHA256SUMS` from [GitHub Releases](.
 
 Windows builds are currently unsigned, and macOS builds are not Apple-notarized. Your operating system may show an unknown-publisher or first-launch warning. Verify the file against `SHA256SUMS` before approving it.
 
-The first upgrade from `v0.7.1` to `v0.8.0` must be installed manually because the older release does not contain the updater. After `v0.8.0` is installed, Windows setup builds and Linux AppImages can download an update in Stone and restart into it. Windows Portable, Linux deb, and current macOS builds open Releases for manual replacement.
+If you are upgrading directly from `v0.7.1` or earlier, the first upgrade to `v0.8.0` or later must be installed manually because the older release does not contain the updater. After `v0.8.0` is installed, Windows setup builds and Linux AppImages can download an update in Stone and restart into it. Windows Portable, Linux deb, and current macOS builds open Releases for manual replacement.
 
 On Linux, run an AppImage or install a deb package:
 
@@ -98,14 +117,17 @@ sudo apt install ./Stone-*.deb
 
 ### 2. Add Accounts and Start Routing
 
-1. Open **Providers**, confirm or add an upstream, then add an API key or access token. Use **Import ChatGPT account** for a Codex / ChatGPT OAuth session.
+> [!NOTE]
+> The `v0.8.0` interface currently uses Simplified Chinese. The English menu names below include their current Chinese labels so you can find each page.
+
+1. Open **Providers (供应商)**, confirm or add an upstream, then add an API key or access token. Use **Import ChatGPT account (导入 ChatGPT 账号)** for a Codex / ChatGPT OAuth session.
 2. Test the account connection, refresh its available models, and choose the models it may expose.
-3. Open **Account Pools**, add compatible accounts, choose a scheduling policy, and select the models published by the pool.
-4. Open **Client Routes**, select a pool for Claude Code, Codex, or Gemini CLI, then save and enable the route.
-5. Open **Client Configuration**, preview the changes, and apply them. Stone backs up existing files first.
+3. Open **Account Pools (号池)**, add compatible accounts, choose a scheduling policy, and select the models published by the pool.
+4. Open **Client Routes (客户端路由)**, select a pool for Claude Code, Codex, or Gemini CLI, then save and enable the route.
+5. Open **Client Configuration (客户端配置)**, preview the changes, and apply them. Stone backs up existing files first.
 6. Start the local gateway, then launch the coding client.
 
-The default gateway address is `http://127.0.0.1:15721`. Manual connection values and the route token are available on the Client Routes page.
+The default gateway address is `http://127.0.0.1:15721`. Manual connection values and the route token are available on the **Client Routes (客户端路由)** page.
 
 ## Privacy and Local Data
 
@@ -124,13 +146,15 @@ The default gateway address is `http://127.0.0.1:15721`. Manual connection value
 - Codex quota charts are available only for ChatGPT OAuth accounts and begin collecting data after Stone first receives quota information.
 - Proxy connectivity tests contact `api.ipify.org` and fall back to `icanhazip.com` to identify the proxy's public egress IP.
 - Linux credential storage requires a Secret Service-compatible keyring such as `libsecret` or KWallet. AppImage may also require FUSE 2.
-- Stone checks GitHub Releases at startup. You can also check manually, read release notes, or ignore a version under **Settings → Application Updates**.
+- Stone checks GitHub Releases at startup. You can also check manually, read release notes, or ignore a version under **Settings → Application Updates (设置 → 应用更新)**.
 - Windows setup builds and Linux AppImages support in-app download and restart installation. Windows Portable, Linux deb, and current macOS builds require a manual update from Releases.
 - Production code signing and macOS notarization are not available yet.
 
 ## Community
 
-Questions, feedback, and usage discussions are welcome in QQ group **1061282900**.
+Use [GitHub Discussions](https://github.com/EasyCode-Obsidian/Stone/discussions) for questions and workflow ideas, [GitHub Issues](https://github.com/EasyCode-Obsidian/Stone/issues) for reproducible bugs and feature requests, and [Private Vulnerability Reporting](https://github.com/EasyCode-Obsidian/Stone/security/advisories/new) for suspected security issues. Read the [Security Policy](SECURITY.md) before sharing diagnostics, and never post real credentials or account data.
+
+Chinese-language discussion is also welcome in QQ group **1061282900**. The community does not support credential sharing, account trading, or advice for bypassing provider terms.
 
 ## Star History
 
