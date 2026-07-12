@@ -1,0 +1,993 @@
+import { createServer as createNodeServer } from 'node:net'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Account, GatewaySettings, Pool, ProviderDefinition, Route } from '../../src/shared/types'
+import { createCanonicalStreamParser, GatewayServer } from '../../src/main/gateway'
+import type { GatewayConfig } from '../../src/main/gateway'
+
+const timestamp = 1_700_000_000_000
+const runningServers: GatewayServer[] = []
+
+function account(id: string, priority: number): Account {
+  return {
+    id,
+    providerId: 'provider',
+    name: id,
+    credentialId: id,
+    maskedCredential: '***',
+    status: 'active',
+    priority,
+    weight: 1,
+    maxConcurrency: 1,
+    inFlight: 0,
+    availableModels: [],
+    modelPolicy: 'all',
+    modelAllowlist: [],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  }
+}
+
+async function freePort(): Promise<number> {
+  const server = createNodeServer()
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Failed to allocate a test port')
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  return address.port
+}
+
+function config(port: number, overrides: Partial<GatewaySettings> = {}): GatewayConfig {
+  const provider: ProviderDefinition = {
+    id: 'provider',
+    name: 'Provider',
+    kind: 'openai-compatible',
+    baseUrl: 'https://api.example.test/v1',
+    protocol: 'openai-chat',
+    models: ['source-model'],
+    createdAt: timestamp,
+    updatedAt: timestamp
+  }
+  const accounts = [account('first', 1), account('second', 10)]
+  const pool: Pool = {
+    id: 'pool',
+    name: 'Pool',
+    protocol: 'openai-chat',
+    strategy: 'priority',
+    members: accounts.map((item) => ({ accountId: item.id, enabled: true })),
+    modelPolicy: 'all',
+    modelAllowlist: [],
+    stickySessions: false,
+    stickyTtlMinutes: 30,
+    maxRetries: 1,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  }
+  const route: Route = {
+    id: 'route',
+    client: 'codex',
+    enabled: true,
+    poolId: pool.id,
+    inboundProtocol: 'openai-chat',
+    modelMap: {},
+    localToken: 'local-secret',
+    createdAt: timestamp,
+    updatedAt: timestamp
+  }
+  return {
+    providers: [provider],
+    accounts,
+    pools: [pool],
+    routes: [route],
+    settings: {
+      host: '127.0.0.1',
+      port,
+      autoStart: false,
+      logPayloads: false,
+      requestTimeoutSeconds: 5,
+      ...overrides
+    }
+  }
+}
+
+async function post(port: number, token = 'local-secret', body: Record<string, unknown> = {}): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'source-model', messages: [{ role: 'user', content: 'Hello' }], ...body })
+  })
+}
+
+async function getModels(port: number, path = '/v1/models', token = 'local-secret'): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}${path}`, {
+    headers: { authorization: `Bearer ${token}` }
+  })
+}
+
+afterEach(async () => {
+  await Promise.all(runningServers.splice(0).map((server) => server.stop()))
+})
+
+describe('GatewayServer', () => {
+  it('requires the matching local route token before calling upstream', async () => {
+    const port = await freePort()
+    const upstreamFetch = vi.fn(async () => new Response('{}'))
+    const gateway = new GatewayServer({
+      config: config(port),
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await post(port, 'wrong-token')
+    expect(response.status).toBe(401)
+    expect(await response.json()).toMatchObject({ error: { type: 'authentication_error' } })
+    expect(upstreamFetch).not.toHaveBeenCalled()
+  })
+
+  it('normalizes a versioned base URL, retries another account, and releases slots', async () => {
+    const port = await freePort()
+    const upstreamFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'rate limited' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json' }
+      }))
+      .mockImplementation(async () => new Response(JSON.stringify({
+          id: 'completion',
+          model: 'source-model',
+          choices: [{ message: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }]
+        }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const gateway = new GatewayServer({
+      config: config(port),
+      credentialResolver: (selected) => `key-${selected.id}`,
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const firstResponse = await post(port)
+    expect(firstResponse.status).toBe(200)
+    expect((await firstResponse.json() as { choices: unknown[] }).choices).toHaveLength(1)
+    expect(upstreamFetch).toHaveBeenCalledTimes(2)
+    expect(upstreamFetch.mock.calls[0][0]).toBe('https://api.example.test/v1/chat/completions')
+    expect(new Headers(upstreamFetch.mock.calls[0][1]?.headers).get('authorization')).toBe('Bearer key-first')
+    expect(new Headers(upstreamFetch.mock.calls[1][1]?.headers).get('authorization')).toBe('Bearer key-second')
+
+    const secondResponse = await post(port)
+    expect(secondResponse.status).toBe(200)
+    expect(upstreamFetch).toHaveBeenCalledTimes(3)
+    expect(new Headers(upstreamFetch.mock.calls[2][1]?.headers).get('authorization')).toBe('Bearer key-second')
+    expect(gateway.getStatus()).toMatchObject({ activeRequests: 0, totalRequests: 2, successRequests: 2 })
+  })
+
+  it('routes ChatGPT OAuth accounts through the Codex backend with account headers', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.accounts[0] = {
+      ...gatewayConfig.accounts[0],
+      credentialType: 'chatgpt-oauth',
+      chatgptAccountId: 'acct-team',
+      credentialExpiresAt: timestamp + 3_600_000
+    }
+    gatewayConfig.accounts[1].status = 'disabled'
+    const stream = [
+      'data: {"type":"response.created","response":{"id":"resp_oauth","model":"gpt-5.1"}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_oauth","model":"gpt-5.1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n'
+    ].join('')
+    const upstreamFetch = vi.fn(async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => ({ secret: 'oauth-private', kind: 'chatgpt-oauth', accountId: 'acct-team' }),
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.1', input: 'Hello', stream: true })
+    })
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('response.completed')
+    expect(upstreamFetch.mock.calls[0][0]).toBe('https://chatgpt.com/backend-api/codex/responses')
+    const request = upstreamFetch.mock.calls[0][1]!
+    const headers = new Headers(request.headers)
+    expect(headers.get('authorization')).toBe('Bearer oauth-private')
+    expect(headers.get('chatgpt-account-id')).toBe('acct-team')
+    expect(headers.get('originator')).toBe('codex_cli_rs')
+    expect(JSON.parse(String(request.body))).toMatchObject({ store: false, stream: true })
+  })
+
+  it('uses one pool-scoped transport for OAuth refresh resolution and generation', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.pools[0].proxyId = 'pool-proxy'
+    gatewayConfig.accounts[0] = { ...gatewayConfig.accounts[0], credentialType: 'chatgpt-oauth' }
+    gatewayConfig.accounts[1].status = 'disabled'
+    const stream = 'data: {"type":"response.completed","response":{"id":"resp_scoped","object":"response","model":"gpt-5.4","status":"completed","output":[]}}\n\n'
+    const scopedFetch = vi.fn(async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    const directFetch = vi.fn(async () => { throw new Error('direct fetch must not run') })
+    const credentialResolver = vi.fn((_account, fetchImplementation) => {
+      expect(fetchImplementation).toBe(scopedFetch)
+      return { secret: 'oauth-private', kind: 'chatgpt-oauth' as const, accountId: 'acct-team' }
+    })
+    const outboundFetchResolver = vi.fn((_account, pool) => {
+      expect(pool.proxyId).toBe('pool-proxy')
+      return scopedFetch as typeof fetch
+    })
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver,
+      fetchImplementation: directFetch as typeof fetch,
+      outboundFetchResolver
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'Hello', stream: true })
+    })
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(outboundFetchResolver).toHaveBeenCalledTimes(1)
+    expect(credentialResolver).toHaveBeenCalledTimes(1)
+    expect(scopedFetch).toHaveBeenCalledTimes(1)
+    expect(directFetch).not.toHaveBeenCalled()
+  })
+
+  it('collects forced OAuth SSE for a non-streaming Responses client', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.accounts[0] = { ...gatewayConfig.accounts[0], credentialType: 'chatgpt-oauth' }
+    gatewayConfig.accounts[1].status = 'disabled'
+    const stream = [
+      'data: {"type":"response.created","response":{"id":"resp_oauth_json","model":"gpt-5.4"}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"Collected"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_oauth_json","object":"response","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+    ].join('')
+    const upstreamFetch = vi.fn(async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => ({ secret: 'oauth-private', kind: 'chatgpt-oauth', accountId: 'acct-team' }),
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'Hello', stream: false })
+    })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    expect(await response.json()).toMatchObject({
+      id: 'resp_oauth_json', object: 'response', status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'Collected' }] }]
+    })
+    expect(JSON.parse(String(upstreamFetch.mock.calls[0][1]?.body))).toMatchObject({ stream: true, store: false })
+  })
+
+  it('disables a rejected OAuth session and fails over to the next pool account', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.accounts = gatewayConfig.accounts.map((candidate) => ({ ...candidate, credentialType: 'chatgpt-oauth' }))
+    const states: Array<{ accountId: string; status: string; lastError?: string }> = []
+    const successStream = [
+      'data: {"type":"response.created","response":{"id":"resp_failover","model":"gpt-5.4"}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"Recovered"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_failover","object":"response","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+    ].join('')
+    const upstreamFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'invalid API key wording must not escape' } }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' }
+      }))
+      .mockResolvedValueOnce(new Response(successStream, { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: (candidate) => ({ secret: `oauth-${candidate.id}`, kind: 'chatgpt-oauth', accountId: `acct-${candidate.id}` }),
+      fetchImplementation: upstreamFetch as typeof fetch,
+      onAccountState: (state) => states.push(state)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'Hello' })
+    })
+    expect(response.status).toBe(200)
+    expect(upstreamFetch).toHaveBeenCalledTimes(2)
+    expect(states[0]).toMatchObject({ accountId: 'first', status: 'disabled', lastError: 'ChatGPT session access token was rejected.' })
+  })
+
+  it('redacts OAuth access and account identifiers across stream chunks', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.accounts[0] = { ...gatewayConfig.accounts[0], credentialType: 'chatgpt-oauth' }
+    gatewayConfig.accounts[1].status = 'disabled'
+    const accessToken = 'oauth-stream-private'
+    const accountId = 'acct-stream-private'
+    const wire = [
+      'data: {"type":"response.created","response":{"id":"resp_private","model":"gpt-5.4"}}\n\n',
+      `data: {"type":"response.output_text.delta","delta":"${accessToken} ${accountId}"}\n\n`,
+      'data: {"type":"response.completed","response":{"id":"resp_private","object":"response","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+    ].join('')
+    const encoded = new TextEncoder().encode(wire)
+    const upstreamFetch = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let offset = 0; offset < encoded.length; offset += 5) controller.enqueue(encoded.slice(offset, offset + 5))
+        controller.close()
+      }
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => ({ secret: accessToken, kind: 'chatgpt-oauth', accountId }),
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'Hello', stream: true })
+    })
+    const responseText = await response.text()
+    expect(response.status).toBe(200)
+    expect(responseText).not.toContain(accessToken)
+    expect(responseText).not.toContain(accountId)
+    expect(responseText.match(/\[REDACTED\]/g)).toHaveLength(2)
+  })
+
+  it('converts collected OAuth SSE to a non-streaming Anthropic response', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'anthropic-messages'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.accounts[0] = { ...gatewayConfig.accounts[0], credentialType: 'chatgpt-oauth' }
+    gatewayConfig.accounts[1].status = 'disabled'
+    const stream = [
+      'data: {"type":"response.created","response":{"id":"resp_to_anthropic","model":"gpt-5.4"}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"Converted"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_to_anthropic","object":"response","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5}}}\n\n'
+    ].join('')
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => ({ secret: 'oauth-private', kind: 'chatgpt-oauth', accountId: 'acct-team' }),
+      fetchImplementation: vi.fn(async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', max_tokens: 64, messages: [{ role: 'user', content: 'Hello' }] })
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      type: 'message', role: 'assistant', content: [{ type: 'text', text: 'Converted' }],
+      usage: { input_tokens: 4, output_tokens: 1 }
+    })
+  })
+
+  it('reports live rate limits and detailed usage after failover', async () => {
+    const port = await freePort()
+    const states: Parameters<NonNullable<ConstructorParameters<typeof GatewayServer>[0]['onAccountState']>>[0][] = []
+    const logs: Parameters<NonNullable<ConstructorParameters<typeof GatewayServer>[0]['onLog']>>[0][] = []
+    const upstreamFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'temporary outage' } }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'completion',
+        model: 'source-model',
+        choices: [{ message: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 12,
+          completion_tokens: 7,
+          total_tokens: 19,
+          prompt_tokens_details: { cached_tokens: 5 },
+          completion_tokens_details: { reasoning_tokens: 3 }
+        }
+      }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'x-ratelimit-limit-requests': '100',
+          'x-ratelimit-remaining-requests': '42',
+          'x-ratelimit-reset-requests': '60s'
+        }
+      }))
+    const gateway = new GatewayServer({
+      config: config(port),
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch,
+      now: () => timestamp,
+      onAccountState: (state) => states.push(state),
+      onLog: (log) => logs.push(log)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    expect((await post(port)).status).toBe(200)
+    expect(states).toContainEqual(expect.objectContaining({
+      accountId: 'second',
+      quota: expect.objectContaining({
+        observedAt: timestamp,
+        requests: { limit: 100, remaining: 42, resetAt: timestamp + 60_000 }
+      })
+    }))
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatchObject({
+      status: 'success',
+      failoverCount: 1,
+      inputTokens: 12,
+      outputTokens: 7,
+      cachedInputTokens: 5,
+      reasoningTokens: 3
+    })
+  })
+
+  it('honors Retry-After and reports account circuit state before failover', async () => {
+    const port = await freePort()
+    const states: Array<{ accountId: string; status: string; cooldownUntil?: number; consecutiveFailures: number }> = []
+    const upstreamFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'limited' } }), {
+        status: 429,
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '120',
+          'x-codex-primary-used-percent': '100',
+          'x-codex-primary-window-minutes': '10080',
+          'x-codex-primary-reset-after-seconds': '604800',
+          'x-codex-secondary-used-percent': '96',
+          'x-codex-secondary-window-minutes': '300',
+          'x-codex-secondary-reset-after-seconds': '18000'
+        }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'completion',
+        model: 'source-model',
+        choices: [{ message: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const gateway = new GatewayServer({
+      config: config(port),
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch,
+      now: () => timestamp,
+      onAccountState: (state) => states.push(state)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    expect((await post(port)).status).toBe(200)
+    expect(states[0]).toMatchObject({
+      accountId: 'first',
+      status: 'cooldown',
+      cooldownUntil: timestamp + 120_000,
+      consecutiveFailures: 1,
+      codexQuota: {
+        fiveHour: expect.objectContaining({ usedPercent: 96 }),
+        sevenDay: expect.objectContaining({ usedPercent: 100 }),
+        source: 'response-headers'
+      }
+    })
+    expect(states.at(-1)).toMatchObject({
+      accountId: 'second',
+      status: 'active',
+      consecutiveFailures: 0
+    })
+  })
+
+  it('fails over and disables an account when the provider reports exhausted quota', async () => {
+    const port = await freePort()
+    const states: Array<{ accountId: string; status: string }> = []
+    const upstreamFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'payment required' } }), {
+        status: 402,
+        headers: { 'content-type': 'application/json' }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'completion',
+        model: 'source-model',
+        choices: [{ message: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const gateway = new GatewayServer({
+      config: config(port),
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch,
+      onAccountState: (state) => states.push(state)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    expect((await post(port)).status).toBe(200)
+    expect(upstreamFetch).toHaveBeenCalledTimes(2)
+    expect(states[0]).toMatchObject({ accountId: 'first', status: 'disabled' })
+  })
+
+  it('redacts the upstream credential from errors, account state, and request logs', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.accounts[1].status = 'disabled'
+    const credential = 'sk-upstream-private'
+    const states: string[] = []
+    const logs: string[] = []
+    const upstreamFetch = vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        message: `Provider echoed ${credential}`,
+        authorization: `Bearer ${credential}`
+      },
+      api_key: credential
+    }), { status: 429, headers: { 'content-type': 'application/json' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => credential,
+      fetchImplementation: upstreamFetch as typeof fetch,
+      onAccountState: (state) => states.push(JSON.stringify(state)),
+      onLog: (log) => logs.push(JSON.stringify(log))
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await post(port)
+    const responseText = await response.text()
+    expect(response.status).toBe(429)
+    expect(responseText).not.toContain(credential)
+    expect(responseText).toContain('[REDACTED]')
+    expect(states.join('')).not.toContain(credential)
+    expect(logs.join('')).not.toContain(credential)
+  })
+
+  it('records one account failure when the retry round has no eligible account', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.accounts[1].status = 'disabled'
+    const states: Array<{ accountId: string; consecutiveFailures: number }> = []
+    const upstreamFetch = vi.fn(async () => new Response(JSON.stringify({ error: { message: 'limited' } }), {
+      status: 429,
+      headers: { 'content-type': 'application/json' }
+    }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch,
+      onAccountState: (state) => states.push(state)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    expect((await post(port)).status).toBe(429)
+    expect(upstreamFetch).toHaveBeenCalledOnce()
+    expect(states).toHaveLength(1)
+    expect(states[0]).toMatchObject({ accountId: 'first', consecutiveFailures: 1 })
+  })
+
+  it('passes through a same-protocol streaming response without buffering it as JSON', async () => {
+    const port = await freePort()
+    const upstreamFetch = vi.fn(async () => new Response('data: {"delta":"one"}\n\ndata: [DONE]\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' }
+    }))
+    const gateway = new GatewayServer({
+      config: config(port),
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await post(port, 'local-secret', { stream: true })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('text/event-stream')
+    expect(response.headers.get('cache-control')).toBe('no-cache')
+    expect(await response.text()).toBe('data: {"delta":"one"}\n\ndata: [DONE]\n\n')
+    expect(gateway.getStatus()).toMatchObject({ activeRequests: 0, successRequests: 1 })
+  })
+
+  it('preserves a same-protocol stream error while marking the account request as failed', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.accounts[1].status = 'disabled'
+    const states: Array<{ accountId: string; status: string }> = []
+    const logs: Array<{ status: string; error?: string }> = []
+    const credential = 'sk-stream-private'
+    const body = `data: {"error":{"message":"overloaded ${credential}","type":"server_error"}}\n\n`
+    const splitAt = body.indexOf(credential) + 7
+    const encoder = new TextEncoder()
+    const upstreamFetch = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(body.slice(0, splitAt)))
+        controller.enqueue(encoder.encode(body.slice(splitAt)))
+        controller.close()
+      }
+    }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => credential,
+      fetchImplementation: upstreamFetch as typeof fetch,
+      onAccountState: (state) => states.push(state),
+      onLog: (log) => logs.push(log)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await post(port, 'local-secret', { stream: true })
+    expect(response.status).toBe(200)
+    const responseText = await response.text()
+    expect(responseText).not.toContain(credential)
+    expect(responseText).toContain('overloaded [REDACTED]')
+    expect(gateway.getStatus().successRequests).toBe(0)
+    expect(states).toHaveLength(1)
+    expect(states[0]).toMatchObject({ accountId: 'first', status: 'cooldown' })
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatchObject({ status: 'error', error: 'overloaded [REDACTED]' })
+  })
+
+  it('marks a cross-protocol stream without a terminal event as failed', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.routes[0].inboundProtocol = 'anthropic-messages'
+    gatewayConfig.accounts[1].status = 'disabled'
+    const states: Array<{ accountId: string; status: string }> = []
+    const upstreamFetch = vi.fn(async () => new Response(
+      'data: {"id":"chat-cut","model":"source-model","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
+    ))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch,
+      onAccountState: (state) => states.push(state)
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'source-model',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'Hello' }]
+      })
+    })
+    const events = createCanonicalStreamParser('anthropic-messages')
+    const parsed = [
+      ...events.push(new Uint8Array(await response.arrayBuffer())),
+      ...events.finish()
+    ]
+    expect(response.status).toBe(200)
+    expect(parsed).toContainEqual(expect.objectContaining({ type: 'error', errorType: 'incomplete_stream' }))
+    expect(gateway.getStatus().successRequests).toBe(0)
+    expect(states).toHaveLength(1)
+  })
+
+  it('can reset hydrated runtime health after a successful manual account check', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.accounts[0] = {
+      ...gatewayConfig.accounts[0],
+      status: 'cooldown',
+      circuitState: 'open',
+      consecutiveFailures: 2,
+      cooldownUntil: timestamp + 60_000
+    }
+    gatewayConfig.accounts[1].status = 'disabled'
+    const upstreamFetch = vi.fn(async () => new Response(JSON.stringify({
+      id: 'completion',
+      model: 'source-model',
+      choices: [{ message: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch,
+      now: () => timestamp
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    expect((await post(port)).status).toBe(503)
+    gatewayConfig.accounts[0] = {
+      ...gatewayConfig.accounts[0],
+      status: 'active',
+      circuitState: 'closed',
+      consecutiveFailures: 0,
+      cooldownUntil: undefined
+    }
+    gateway.resetAccountHealth('first')
+    gateway.updateConfig(gatewayConfig)
+    expect((await post(port)).status).toBe(200)
+    expect(upstreamFetch).toHaveBeenCalledOnce()
+  })
+
+  it('checks account allowlists against the mapped upstream model', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.routes[0].modelMap = { alias: 'upstream-model' }
+    gatewayConfig.accounts[0].modelAllowlist = ['upstream-model']
+    gatewayConfig.accounts[1].status = 'disabled'
+    const upstreamFetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ model: 'upstream-model' })
+      return new Response(JSON.stringify({
+        id: 'completion',
+        model: 'upstream-model',
+        choices: [{ message: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await post(port, 'local-secret', { model: 'alias' })
+    expect(response.status).toBe(200)
+    expect(upstreamFetch).toHaveBeenCalledOnce()
+  })
+
+  it('returns the route pool model union in OpenAI format without contacting upstream', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.accounts[0] = {
+      ...gatewayConfig.accounts[0],
+      modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5']
+    }
+    gatewayConfig.accounts[1] = {
+      ...gatewayConfig.accounts[1],
+      modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5', 'gpt-5.5-mini']
+    }
+    gatewayConfig.routes[0].modelMap = { fast: 'gpt-5.5-mini' }
+    const credentialResolver = vi.fn(() => 'credential')
+    const upstreamFetch = vi.fn()
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver,
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await getModels(port)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(await response.json()).toEqual({
+      object: 'list',
+      data: [
+        { id: 'gpt-5.5', object: 'model', created: Math.floor(gatewayConfig.pools[0].updatedAt / 1000), owned_by: 'stone' },
+        { id: 'gpt-5.5-mini', object: 'model', created: Math.floor(gatewayConfig.pools[0].updatedAt / 1000), owned_by: 'stone' },
+        { id: 'fast', object: 'model', created: Math.floor(gatewayConfig.pools[0].updatedAt / 1000), owned_by: 'stone' }
+      ]
+    })
+    expect(credentialResolver).not.toHaveBeenCalled()
+    expect(upstreamFetch).not.toHaveBeenCalled()
+  })
+
+  it('applies an explicit pool selection to model listing and generation', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.accounts.forEach((candidate) => {
+      candidate.modelPolicy = 'selected'
+      candidate.modelAllowlist = ['source-model', 'closed-model']
+    })
+    gatewayConfig.pools[0].modelPolicy = 'selected'
+    gatewayConfig.pools[0].modelAllowlist = ['source-model']
+    const upstreamFetch = vi.fn()
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const list = await getModels(port)
+    expect((await list.json() as { data: Array<{ id: string }> }).data.map((model) => model.id))
+      .toEqual(['source-model'])
+    const denied = await post(port, 'local-secret', { model: 'closed-model' })
+    expect(denied.status).toBe(404)
+    expect(await denied.json()).toMatchObject({ error: { type: 'model_not_found' } })
+    expect(upstreamFetch).not.toHaveBeenCalled()
+
+    gatewayConfig.pools[0].modelAllowlist = []
+    gateway.updateConfig(gatewayConfig)
+    const empty = await getModels(port)
+    expect(await empty.json()).toMatchObject({ object: 'list', data: [] })
+  })
+
+  it('returns a Gemini-compatible local model catalog for the Gemini route token', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0] = {
+      ...gatewayConfig.providers[0],
+      protocol: 'gemini',
+      models: ['gemini-2.5-pro']
+    }
+    gatewayConfig.pools[0] = { ...gatewayConfig.pools[0], protocol: 'gemini' }
+    gatewayConfig.routes[0] = { ...gatewayConfig.routes[0], inboundProtocol: 'gemini' }
+    const gateway = new GatewayServer({ config: gatewayConfig, credentialResolver: () => 'credential' })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await getModels(port, '/v1beta/models')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      models: [{
+        name: 'models/gemini-2.5-pro',
+        baseModelId: 'gemini-2.5-pro',
+        version: '001',
+        displayName: 'gemini-2.5-pro',
+        supportedGenerationMethods: ['generateContent']
+      }]
+    })
+    expect((await getModels(port, '/v1/models')).status).toBe(401)
+  })
+
+  it('returns Anthropic model metadata for an Anthropic route', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0] = {
+      ...gatewayConfig.providers[0],
+      protocol: 'anthropic-messages',
+      models: ['claude-sonnet-4-5']
+    }
+    gatewayConfig.pools[0] = { ...gatewayConfig.pools[0], protocol: 'anthropic-messages' }
+    gatewayConfig.routes[0] = { ...gatewayConfig.routes[0], inboundProtocol: 'anthropic-messages' }
+    const gateway = new GatewayServer({ config: gatewayConfig, credentialResolver: () => 'credential' })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { 'x-api-key': 'local-secret' }
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      data: [{
+        type: 'model',
+        id: 'claude-sonnet-4-5',
+        display_name: 'claude-sonnet-4-5',
+        created_at: new Date(gatewayConfig.pools[0].updatedAt).toISOString()
+      }],
+      has_more: false,
+      first_id: 'claude-sonnet-4-5',
+      last_id: 'claude-sonnet-4-5'
+    })
+  })
+
+  it('requires a valid route token before returning a model catalog', async () => {
+    const port = await freePort()
+    const gateway = new GatewayServer({ config: config(port), credentialResolver: () => 'credential' })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    expect((await getModels(port, '/v1/models', 'wrong-token')).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/v1/models`)).status).toBe(401)
+  })
+
+  it('requests Gemini streaming responses as SSE', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0] = {
+      ...gatewayConfig.providers[0],
+      kind: 'google',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      protocol: 'gemini',
+      models: ['gemini-test']
+    }
+    gatewayConfig.pools[0].protocol = 'gemini'
+    gatewayConfig.routes[0].inboundProtocol = 'gemini'
+    const upstreamFetch = vi.fn(async () => new Response('data: {"candidates":[]}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1beta/models/gemini-test:streamGenerateContent`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Hello' }] }] })
+    })
+    expect(response.status).toBe(200)
+    expect(upstreamFetch.mock.calls[0][0]).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-test:streamGenerateContent?alt=sse'
+    )
+  })
+
+  it('converts an OpenAI Chat stream to Anthropic SSE through the live gateway', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.routes[0].inboundProtocol = 'anthropic-messages'
+    const upstreamFetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ model: 'source-model', stream: true })
+      expect(new Headers(init?.headers).get('accept')).toBe('text/event-stream')
+      return new Response([
+        'data: {"id":"chat-1","object":"chat.completion.chunk","model":"source-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}',
+        '',
+        'data: {"id":"chat-1","object":"chat.completion.chunk","model":"source-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        '',
+        'data: [DONE]',
+        ''
+      ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    })
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'credential',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'source-model',
+        max_tokens: 128,
+        stream: true,
+        messages: [{ role: 'user', content: 'Hi' }]
+      })
+    })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const parser = createCanonicalStreamParser('anthropic-messages')
+    const events = [
+      ...parser.push(new Uint8Array(await response.arrayBuffer())),
+      ...parser.finish()
+    ]
+    expect(events).toContainEqual({ type: 'text-delta', text: 'Hello' })
+    expect(events.some((event) => event.type === 'stop' && event.reason === 'stop')).toBe(true)
+    expect(upstreamFetch).toHaveBeenCalledOnce()
+  })
+
+  it('refuses to bind a non-loopback host', async () => {
+    const gateway = new GatewayServer({
+      config: config(0, { host: '0.0.0.0' }),
+      credentialResolver: () => 'credential'
+    })
+    await expect(gateway.start()).rejects.toThrow('loopback-only')
+    expect(gateway.getStatus().running).toBe(false)
+  })
+})

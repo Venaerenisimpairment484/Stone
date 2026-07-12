@@ -1,0 +1,216 @@
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http'
+import { connect as connectTcp, type Socket } from 'node:net'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  OutboundTransportManager,
+  proxyEntryAddress,
+  resolveEffectiveProxy
+} from '../../src/main/proxy'
+import type { ProxyProtocol, PublicProxyDefinition } from '../../src/shared/types'
+
+const managers = new Set<OutboundTransportManager>()
+const servers = new Set<HttpServer>()
+
+afterEach(async () => {
+  await Promise.all([...managers].map((manager) => manager.close()))
+  managers.clear()
+  await Promise.all([...servers].map(closeServer))
+  servers.clear()
+})
+
+describe('effective proxy resolution', () => {
+  const accountProxy = proxyDefinition({ id: 'proxy-account', name: 'Account proxy' })
+  const poolProxy = proxyDefinition({ id: 'proxy-pool', name: 'Pool proxy' })
+  const proxies = [accountProxy, poolProxy]
+
+  it('prefers an account override over the pool default', () => {
+    expect(resolveEffectiveProxy(
+      { proxyId: accountProxy.id },
+      { proxyId: poolProxy.id },
+      proxies
+    )).toBe(accountProxy)
+  })
+
+  it('uses the pool default when the account has no override', () => {
+    expect(resolveEffectiveProxy({}, { proxyId: poolProxy.id }, proxies)).toBe(poolProxy)
+  })
+
+  it('uses a direct connection only when neither scope configures a proxy', () => {
+    expect(resolveEffectiveProxy({}, {}, proxies)).toBeUndefined()
+    expect(resolveEffectiveProxy({}, undefined, proxies)).toBeUndefined()
+  })
+
+  it('fails closed when the selected account or pool proxy is missing', () => {
+    expect(() => resolveEffectiveProxy(
+      { proxyId: 'deleted-account-proxy' },
+      { proxyId: poolProxy.id },
+      proxies
+    )).toThrow('configured outbound proxy no longer exists')
+    expect(() => resolveEffectiveProxy(
+      {},
+      { proxyId: 'deleted-pool-proxy' },
+      proxies
+    )).toThrow('configured outbound proxy no longer exists')
+  })
+})
+
+describe('proxy entry presentation', () => {
+  it('brackets IPv6 hosts and does not expose proxy credentials', () => {
+    const proxy = proxyDefinition({
+      protocol: 'socks5',
+      host: '2001:db8::10',
+      port: 1080,
+      username: 'private-user',
+      hasPassword: true
+    })
+
+    const entryAddress = proxyEntryAddress(proxy)
+
+    expect(entryAddress).toBe('socks5://[2001:db8::10]:1080')
+    expect(entryAddress).not.toContain('private-user')
+    expect(entryAddress).not.toContain('@')
+  })
+})
+
+describe('outbound proxy transport', () => {
+  it('forwards a real HTTP request through the configured HTTP proxy', async () => {
+    let originHits = 0
+    let proxyConnects = 0
+    const origin = await listen(createHttpServer((_request, response) => {
+      originHits += 1
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('served through proxy')
+    }))
+    const proxy = createHttpServer((_request, response) => {
+      response.writeHead(502)
+      response.end()
+    })
+    proxy.on('connect', (request, clientSocket, head) => {
+      proxyConnects += 1
+      forwardTunnel(request.url, clientSocket, head)
+    })
+    const proxyAddress = await listen(proxy)
+    const manager = trackManager(new OutboundTransportManager())
+    const fetchThroughProxy = manager.fetchFor(proxyDefinition({
+      host: '127.0.0.1',
+      port: proxyAddress.port
+    }))
+
+    const response = await fetchThroughProxy(`http://127.0.0.1:${origin.port}/through-proxy`, {
+      signal: AbortSignal.timeout(3_000)
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('served through proxy')
+    expect(proxyConnects).toBe(1)
+    expect(originHits).toBe(1)
+  })
+
+  it('does not fall back to a direct request when the configured proxy fails', async () => {
+    let originHits = 0
+    let proxyConnects = 0
+    const origin = await listen(createHttpServer((_request, response) => {
+      originHits += 1
+      response.end('direct access must not happen')
+    }))
+    const failingProxy = createHttpServer()
+    failingProxy.on('connect', (_request, clientSocket) => {
+      proxyConnects += 1
+      clientSocket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
+    })
+    const proxyAddress = await listen(failingProxy)
+    const manager = trackManager(new OutboundTransportManager())
+    const fetchThroughProxy = manager.fetchFor(proxyDefinition({
+      id: 'failing-proxy',
+      host: '127.0.0.1',
+      port: proxyAddress.port
+    }))
+
+    await expect(fetchThroughProxy(`http://127.0.0.1:${origin.port}/must-not-be-direct`, {
+      signal: AbortSignal.timeout(3_000)
+    })).rejects.toThrow()
+    expect(proxyConnects).toBeGreaterThan(0)
+    expect(originHits).toBe(0)
+  })
+
+  it.each<ProxyProtocol>(['socks4', 'socks5'])('constructs a %s dispatcher', async (protocol) => {
+    const manager = trackManager(new OutboundTransportManager())
+
+    expect(manager.fetchFor(proxyDefinition({
+      id: `${protocol}-proxy`,
+      protocol,
+      host: '127.0.0.1',
+      port: 1080
+    }))).toBeTypeOf('function')
+  })
+
+  it('does not reuse cached authentication when vault access or the password changes', () => {
+    const manager = trackManager(new OutboundTransportManager())
+    const proxy = proxyDefinition({ id: 'authenticated', hasPassword: true })
+    const first = manager.fetchFor(proxy, 'first password')
+
+    expect(() => manager.fetchFor(proxy)).toThrow('authentication is unavailable')
+    expect(manager.fetchFor(proxy, 'second password')).not.toBe(first)
+  })
+})
+
+function proxyDefinition(overrides: Partial<PublicProxyDefinition> = {}): PublicProxyDefinition {
+  return {
+    id: 'proxy-1',
+    name: 'Local proxy',
+    protocol: 'http',
+    host: '127.0.0.1',
+    port: 3128,
+    hasPassword: false,
+    status: 'unchecked',
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides
+  }
+}
+
+async function listen(server: HttpServer): Promise<{ host: string; port: number }> {
+  servers.add(server)
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject)
+      resolve()
+    })
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Test server did not bind a TCP port')
+  return { host: address.address, port: address.port }
+}
+
+function forwardTunnel(target: string | undefined, clientSocket: Socket, head: Buffer): void {
+  if (!target) {
+    clientSocket.destroy()
+    return
+  }
+  const targetUrl = new URL(`http://${target}`)
+  const upstream = connectTcp(Number(targetUrl.port || 80), targetUrl.hostname)
+  upstream.once('connect', () => {
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    if (head.byteLength > 0) upstream.write(head)
+    upstream.pipe(clientSocket)
+    clientSocket.pipe(upstream)
+  })
+  upstream.once('error', () => {
+    clientSocket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
+    clientSocket.destroy()
+  })
+  clientSocket.once('error', () => upstream.destroy())
+}
+
+function trackManager(manager: OutboundTransportManager): OutboundTransportManager {
+  managers.add(manager)
+  return manager
+}
+
+async function closeServer(server: HttpServer): Promise<void> {
+  if (!server.listening) return
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve())
+  })
+}

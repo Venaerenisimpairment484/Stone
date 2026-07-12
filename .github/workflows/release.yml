@@ -1,0 +1,207 @@
+name: Release desktop apps
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing or new release tag, for example v0.7.1
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub Release as a prerelease
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stone-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release tag
+        run: npm run release:check -- "$RELEASE_TAG"
+
+      - name: Run checks and production build
+        run: npm run check
+
+  package:
+    name: Package ${{ matrix.name }}
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            id: windows-x64
+            os: windows-latest
+            builder_args: --win nsis portable --x64
+            artifact_path: |
+              release/Stone-*-windows-x64-setup.exe
+              release/Stone-*-windows-x64-portable.exe
+          - name: Linux x64
+            id: linux-x64
+            os: ubuntu-latest
+            builder_args: --linux AppImage deb --x64
+            artifact_path: |
+              release/Stone-*-linux-x86_64.AppImage
+              release/Stone-*-linux-amd64.deb
+          - name: Linux arm64
+            id: linux-arm64
+            os: ubuntu-24.04-arm
+            builder_args: --linux AppImage deb --arm64
+            artifact_path: |
+              release/Stone-*-linux-arm64.AppImage
+              release/Stone-*-linux-arm64.deb
+          - name: macOS Intel
+            id: macos-x64
+            os: macos-15-intel
+            builder_args: --mac dmg zip --x64 --config.mac.identity=- --config.mac.hardenedRuntime=false
+            artifact_path: |
+              release/Stone-*-macos-x64.dmg
+              release/Stone-*-macos-x64.zip
+          - name: macOS Apple Silicon
+            id: macos-arm64
+            os: macos-15
+            builder_args: --mac dmg zip --arm64 --config.mac.identity=- --config.mac.hardenedRuntime=false
+            artifact_path: |
+              release/Stone-*-macos-arm64.dmg
+              release/Stone-*-macos-arm64.zip
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Build native packages
+        run: >-
+          npx electron-builder ${{ matrix.builder_args }} --publish never
+          --config.extraMetadata.homepage=https://github.com/${{ github.repository }}
+          --config.extraMetadata.repository=https://github.com/${{ github.repository }}
+          --config.extraMetadata.author.name=${{ github.repository_owner }}
+          --config.extraMetadata.author.email=${{ github.repository_owner }}@users.noreply.github.com
+          --config.linux.maintainer=${{ github.repository_owner }}@users.noreply.github.com
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stone-${{ matrix.id }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRERELEASE_INPUT: ${{ inputs.prerelease || false }}
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stone-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify expected packages
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          expected=(
+            "Stone-${version}-windows-x64-setup.exe"
+            "Stone-${version}-windows-x64-portable.exe"
+            "Stone-${version}-linux-x86_64.AppImage"
+            "Stone-${version}-linux-amd64.deb"
+            "Stone-${version}-linux-arm64.AppImage"
+            "Stone-${version}-linux-arm64.deb"
+            "Stone-${version}-macos-x64.dmg"
+            "Stone-${version}-macos-x64.zip"
+            "Stone-${version}-macos-arm64.dmg"
+            "Stone-${version}-macos-arm64.zip"
+          )
+          for asset in "${expected[@]}"; do
+            if [[ ! -f "release-assets/${asset}" ]]; then
+              echo "Missing expected release asset: ${asset}" >&2
+              exit 1
+            fi
+          done
+          if [[ "$(find release-assets -maxdepth 1 -type f | wc -l)" -ne "${#expected[@]}" ]]; then
+            echo 'Unexpected files were found in release-assets.' >&2
+            find release-assets -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum Stone-* > SHA256SUMS
+
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          assets=(release-assets/*)
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+
+          release_args=(
+            "$RELEASE_TAG"
+            "${assets[@]}"
+            --repo "$GITHUB_REPOSITORY"
+            --target "$GITHUB_SHA"
+            --title "Stone ${RELEASE_TAG}"
+            --generate-notes
+            --notes $'> [!WARNING]\n> macOS artifacts are ad-hoc signed and are not Apple-notarized. Windows artifacts are unsigned. Linux credential storage requires a Secret Service-compatible keyring; AppImage may require FUSE 2.'
+          )
+          if [[ "$RELEASE_TAG" == *-* || "$PRERELEASE_INPUT" == 'true' ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "${release_args[@]}"

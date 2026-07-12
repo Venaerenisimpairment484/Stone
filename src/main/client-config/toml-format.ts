@@ -1,0 +1,350 @@
+import { parse, TomlError } from 'smol-toml'
+import type { TextMutation } from './json-format'
+import { ClientConfigParseError } from './types'
+
+type TomlValue = string | boolean | number | string[]
+
+interface TomlAssignment {
+  key: string
+  value: TomlValue
+}
+
+interface TomlStatement {
+  start: number
+  end: number
+  kind: 'assignment' | 'header' | 'other'
+  path?: string[]
+}
+
+interface ScannerState {
+  bracketDepth: number
+  multilineQuote?: 'basic' | 'literal'
+}
+
+const probeValue = '__stone_toml_probe_6f2b11c2__'
+
+function tomlValue(value: TomlValue): string {
+  if (Array.isArray(value)) return `[${value.map((item) => JSON.stringify(item)).join(', ')}]`
+  return typeof value === 'string' ? JSON.stringify(value) : String(value)
+}
+
+export function parseCodexToml(content: string): Record<string, unknown> {
+  try {
+    return parse(content) as Record<string, unknown>
+  } catch (error) {
+    const detail = error instanceof TomlError
+      ? `syntax error at line ${error.line}, column ${error.column}`
+      : 'invalid TOML'
+    throw new ClientConfigParseError('codex-config', detail)
+  }
+}
+
+function findProbePath(value: unknown, path: string[] = []): string[] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  for (const [key, child] of Object.entries(value)) {
+    if (child === probeValue) return [...path, key]
+    const nested = findProbePath(child, [...path, key])
+    if (nested) return nested
+  }
+  return undefined
+}
+
+function assignmentEqualsIndex(line: string): number {
+  let quote: 'basic' | 'literal' | undefined
+  let escaped = false
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index]
+    if (quote === 'basic' && escaped) {
+      escaped = false
+      continue
+    }
+    if (quote === 'basic' && character === '\\') {
+      escaped = true
+      continue
+    }
+    if (character === '"' && quote !== 'literal') quote = quote === 'basic' ? undefined : 'basic'
+    else if (character === "'" && quote !== 'basic') quote = quote === 'literal' ? undefined : 'literal'
+    else if (character === '=' && quote === undefined) return index
+  }
+  return -1
+}
+
+function assignmentPath(line: string): string[] | undefined {
+  const equalsIndex = assignmentEqualsIndex(line)
+  if (equalsIndex < 0) return undefined
+
+  const key = line.slice(0, equalsIndex).trim()
+  if (!key) return undefined
+  try {
+    return findProbePath(parse(`${key} = ${JSON.stringify(probeValue)}`))
+  } catch {
+    return undefined
+  }
+}
+
+function headerPath(line: string): string[] | undefined {
+  const trimmed = line.trimStart()
+  if (!trimmed.startsWith('[') || trimmed.startsWith('[[')) return undefined
+  try {
+    const path = findProbePath(parse(`${line}\n${JSON.stringify(probeValue)} = ${JSON.stringify(probeValue)}`))
+    return path?.slice(0, -1)
+  } catch {
+    return undefined
+  }
+}
+
+function scanLine(line: string, state: ScannerState): void {
+  let quote: 'basic' | 'literal' | undefined
+  let escaped = false
+
+  for (let index = 0; index < line.length;) {
+    if (state.multilineQuote === 'basic') {
+      if (line.startsWith('"""', index)) {
+        let backslashes = 0
+        for (let cursor = index - 1; cursor >= 0 && line[cursor] === '\\'; cursor -= 1) backslashes += 1
+        if (backslashes % 2 === 0) {
+          state.multilineQuote = undefined
+          index += 3
+          continue
+        }
+      }
+      index += 1
+      continue
+    }
+    if (state.multilineQuote === 'literal') {
+      if (line.startsWith("'''", index)) {
+        state.multilineQuote = undefined
+        index += 3
+        continue
+      }
+      index += 1
+      continue
+    }
+
+    const character = line[index]
+    if (quote === 'basic' && escaped) {
+      escaped = false
+      index += 1
+      continue
+    }
+    if (quote === 'basic' && character === '\\') {
+      escaped = true
+      index += 1
+      continue
+    }
+    if (quote === undefined && line.startsWith('"""', index)) {
+      state.multilineQuote = 'basic'
+      index += 3
+      continue
+    }
+    if (quote === undefined && line.startsWith("'''", index)) {
+      state.multilineQuote = 'literal'
+      index += 3
+      continue
+    }
+    if (character === '"' && quote !== 'literal') {
+      quote = quote === 'basic' ? undefined : 'basic'
+      index += 1
+      continue
+    }
+    if (character === "'" && quote !== 'basic') {
+      quote = quote === 'literal' ? undefined : 'literal'
+      index += 1
+      continue
+    }
+    if (quote === undefined && character === '#') break
+    if (quote === undefined && (character === '[' || character === '{')) state.bracketDepth += 1
+    else if (quote === undefined && (character === ']' || character === '}')) state.bracketDepth -= 1
+    index += 1
+  }
+}
+
+function statementKind(line: string): Pick<TomlStatement, 'kind' | 'path'> {
+  const trimmed = line.trimStart()
+  if (trimmed.startsWith('[')) return { kind: 'header', path: headerPath(line) }
+  const path = assignmentPath(line)
+  return path ? { kind: 'assignment', path } : { kind: 'other' }
+}
+
+function analyzeStatements(lines: string[]): TomlStatement[] {
+  const statements: TomlStatement[] = []
+  const state: ScannerState = { bracketDepth: 0 }
+  let statementStart: number | undefined
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const startsAtTopLevel = state.multilineQuote === undefined && state.bracketDepth === 0
+    if (statementStart === undefined && startsAtTopLevel && !/^\s*(?:#.*)?$/.test(lines[index])) {
+      statementStart = index
+    }
+    scanLine(lines[index], state)
+    if (statementStart !== undefined && state.multilineQuote === undefined && state.bracketDepth === 0) {
+      statements.push({ start: statementStart, end: index, ...statementKind(lines[statementStart]) })
+      statementStart = undefined
+    }
+  }
+  return statements
+}
+
+function samePath(left: string[] | undefined, right: string[]): boolean {
+  return left?.length === right.length && left.every((part, index) => part === right[index])
+}
+
+function replaceValue(line: string, value: TomlValue): string {
+  const equalsIndex = assignmentEqualsIndex(line)
+  if (equalsIndex < 0) return line
+  const prefix = line.slice(0, equalsIndex + 1)
+  const remainder = line.slice(equalsIndex + 1)
+  const leadingWhitespace = remainder.match(/^\s*/)?.[0] ?? ''
+  let quote: 'single' | 'double' | undefined
+  let escaped = false
+  let commentIndex = -1
+  for (let index = leadingWhitespace.length; index < remainder.length; index += 1) {
+    const character = remainder[index]
+    if (quote === 'double' && escaped) {
+      escaped = false
+      continue
+    }
+    if (quote === 'double' && character === '\\') {
+      escaped = true
+      continue
+    }
+    if (character === '"' && quote !== 'single') quote = quote === 'double' ? undefined : 'double'
+    else if (character === "'" && quote !== 'double') quote = quote === 'single' ? undefined : 'single'
+    else if (character === '#' && quote === undefined) {
+      commentIndex = index
+      break
+    }
+  }
+  const valueEnd = commentIndex >= 0 ? commentIndex : remainder.length
+  const trailingWhitespace = remainder.slice(leadingWhitespace.length, valueEnd).match(/\s*$/)?.[0] ?? ''
+  const comment = commentIndex >= 0 ? remainder.slice(commentIndex) : ''
+  return `${prefix}${leadingWhitespace}${tomlValue(value)}${trailingWhitespace}${comment}`
+}
+
+function setTopLevel(lines: string[], assignment: TomlAssignment): void {
+  const statements = analyzeStatements(lines)
+  const firstHeader = statements.find((statement) => statement.kind === 'header')?.start ?? lines.length
+  const existing = statements.find((statement) => (
+    statement.kind === 'assignment'
+    && statement.start < firstHeader
+    && samePath(statement.path, [assignment.key])
+  ))
+  if (existing) {
+    lines.splice(existing.start, existing.end - existing.start + 1, replaceValue(lines[existing.start], assignment.value))
+    return
+  }
+
+  const separator = firstHeader < lines.length && firstHeader > 0 && lines[firstHeader - 1] !== '' ? [''] : []
+  lines.splice(firstHeader, 0, `${assignment.key} = ${tomlValue(assignment.value)}`, ...separator)
+}
+
+function removeTopLevel(lines: string[], key: string): void {
+  const statements = analyzeStatements(lines)
+  const firstHeader = statements.find((statement) => statement.kind === 'header')?.start ?? lines.length
+  const existing = statements.find((statement) => (
+    statement.kind === 'assignment'
+    && statement.start < firstHeader
+    && samePath(statement.path, [key])
+  ))
+  if (existing) lines.splice(existing.start, existing.end - existing.start + 1)
+}
+
+function sectionBounds(lines: string[], name: string[]): { start: number, end: number } | undefined {
+  const statements = analyzeStatements(lines)
+  const headerIndex = statements.findIndex((statement) => statement.kind === 'header' && samePath(statement.path, name))
+  if (headerIndex < 0) return undefined
+  const header = statements[headerIndex]
+  const nextHeader = statements.slice(headerIndex + 1).find((statement) => statement.kind === 'header')
+  return { start: header.end + 1, end: nextHeader?.start ?? lines.length }
+}
+
+function setSection(
+  lines: string[],
+  name: string[],
+  assignments: TomlAssignment[],
+  removedKeys: ReadonlySet<string> = new Set(),
+): void {
+  const initialBounds = sectionBounds(lines, name)
+  if (!initialBounds) {
+    if (lines.length && lines.at(-1) !== '') lines.push('')
+    lines.push(`[${name.join('.')}]`, ...assignments.map(({ key, value }) => `${key} = ${tomlValue(value)}`))
+    return
+  }
+
+  const desired = new Map(assignments.map((assignment) => [assignment.key, assignment]))
+  const found = new Set<string>()
+  const statements = analyzeStatements(lines)
+    .filter((statement) => (
+      statement.start >= initialBounds.start
+      && statement.end < initialBounds.end
+      && statement.kind === 'assignment'
+    ))
+    .sort((left, right) => right.start - left.start)
+
+  for (const statement of statements) {
+    if (statement.path?.length !== 1) continue
+    const key = statement.path[0]
+    if (removedKeys.has(key)) {
+      lines.splice(statement.start, statement.end - statement.start + 1)
+      continue
+    }
+    const assignment = desired.get(key)
+    if (!assignment) continue
+    lines.splice(
+      statement.start,
+      statement.end - statement.start + 1,
+      replaceValue(lines[statement.start], assignment.value),
+    )
+    found.add(key)
+  }
+
+  const missing = assignments.filter((assignment) => !found.has(assignment.key))
+  if (!missing.length) return
+  const bounds = sectionBounds(lines, name)
+  if (!bounds) throw new ClientConfigParseError('codex-config', `section ${name.join('.')} disappeared while patching`)
+  lines.splice(bounds.end, 0, ...missing.map(({ key, value }) => `${key} = ${tomlValue(value)}`))
+}
+
+export function planCodexToml(content: string | undefined, baseUrl: string): TextMutation {
+  const source = content ?? ''
+  parseCodexToml(source)
+
+  const eol = source.includes('\r\n') ? '\r\n' : '\n'
+  const trailingNewline = content === undefined || /\r?\n$/.test(source)
+  const lines = source === '' ? [] : source.split(/\r?\n/)
+  if (lines.at(-1) === '') lines.pop()
+
+  setTopLevel(lines, { key: 'model_provider', value: 'stone' })
+  setTopLevel(lines, { key: 'cli_auth_credentials_store', value: 'file' })
+  setSection(lines, ['model_providers', 'stone'], [
+    { key: 'name', value: 'Stone' },
+    { key: 'base_url', value: baseUrl },
+    { key: 'wire_api', value: 'responses' },
+    { key: 'requires_openai_auth', value: true },
+  ], new Set(['env_key']))
+
+  let next = lines.join(eol)
+  if (trailingNewline) next += eol
+  parseCodexToml(next)
+  return { content: next, changed: next !== content }
+}
+
+export function patchCodexTomlTopLevel(
+  content: string | undefined,
+  patches: Readonly<Record<string, TomlValue | null>>,
+): TextMutation {
+  const source = content ?? ''
+  parseCodexToml(source)
+  const eol = source.includes('\r\n') ? '\r\n' : '\n'
+  const trailingNewline = content === undefined || /\r?\n$/.test(source)
+  const lines = source === '' ? [] : source.split(/\r?\n/)
+  if (lines.at(-1) === '') lines.pop()
+  for (const [key, value] of Object.entries(patches)) {
+    if (value === null) removeTopLevel(lines, key)
+    else setTopLevel(lines, { key, value })
+  }
+  let next = lines.join(eol)
+  if (trailingNewline && next !== '') next += eol
+  parseCodexToml(next)
+  return { content: next, changed: next !== content }
+}

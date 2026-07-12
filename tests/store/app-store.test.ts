@@ -1,0 +1,1354 @@
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { RequestLog } from '../../src/shared/types'
+
+vi.mock('electron', () => ({
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    getSelectedStorageBackend: () => 'gnome_libsecret',
+    encryptString: (value: string) => Buffer.from(`vault:${value}`, 'utf8'),
+    decryptString: (value: Buffer) => value.toString('utf8').replace(/^vault:/, '')
+  }
+}))
+
+import { AppStore } from '../../src/main/store/app-store'
+import {
+  LEGACY_JSON_FILENAME,
+  SQLITE_DATABASE_FILENAME,
+  SQLITE_SCHEMA_VERSION,
+  SqliteStateStore
+} from '../../src/main/store/sqlite-state-store'
+import type { PersistedState } from '../../src/main/store/types'
+
+describe('AppStore', () => {
+  let directory: string
+  const stores: AppStore[] = []
+  const stateStores: Array<SqliteStateStore<PersistedState>> = []
+
+  const createStore = (targetDirectory = directory): AppStore => {
+    const store = new AppStore(targetDirectory)
+    stores.push(store)
+    return store
+  }
+
+  const createStateStore = (initialData: PersistedState): SqliteStateStore<PersistedState> => {
+    const store = new SqliteStateStore({
+      databasePath: join(directory, SQLITE_DATABASE_FILENAME),
+      legacyJsonPath: join(directory, LEGACY_JSON_FILENAME),
+      initialData,
+      normalize: (state) => ({ ...state, requestLogs: state.requestLogs.slice(0, 500) })
+    })
+    stateStores.push(store)
+    return store
+  }
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'stone-store-'))
+  })
+
+  afterEach(async () => {
+    await Promise.all([...stores.splice(0), ...stateStores.splice(0)].map((store) => store.close()))
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  it('encrypts credentials and never includes them in renderer snapshots', async () => {
+    const store = createStore()
+    await store.initialize()
+    const snapshot = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Primary',
+      credential: 'sk-secret-value',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 2,
+      modelAllowlist: []
+    })
+
+    const account = snapshot.accounts[0]
+    expect(account.maskedCredential).toBe('****alue')
+    expect(account).not.toHaveProperty('credentialId')
+    expect(store.getCredential(store.getRuntimeAccount(account.id)!.credentialId)).toBe('sk-secret-value')
+    expect('credentials' in snapshot).toBe(false)
+
+    await store.close()
+    const persisted = await readFile(join(directory, SQLITE_DATABASE_FILENAME))
+    expect(persisted.includes(Buffer.from('sk-secret-value', 'utf8'))).toBe(false)
+
+    const restarted = createStore()
+    await restarted.initialize()
+    const restartedAccount = restarted.getSnapshot().accounts[0]
+    expect(restartedAccount.maskedCredential).toBe('****alue')
+    expect(restartedAccount).not.toHaveProperty('credentialId')
+    expect(restarted.getCredential(restarted.getRuntimeAccount(restartedAccount.id)!.credentialId)).toBe('sk-secret-value')
+  })
+
+  it('persists reusable proxies with encrypted passwords and supports update, clear, and delete', async () => {
+    const password = 'proxy-password-private'
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveProxy({
+      name: 'Local SOCKS',
+      protocol: 'socks5',
+      host: '127.0.0.1',
+      port: 1080,
+      username: 'proxy-user',
+      password
+    })
+    const proxy = created.proxies[0]
+
+    expect(proxy).toMatchObject({
+      name: 'Local SOCKS',
+      protocol: 'socks5',
+      host: '127.0.0.1',
+      port: 1080,
+      username: 'proxy-user',
+      hasPassword: true,
+      status: 'unchecked'
+    })
+    expect(proxy).not.toHaveProperty('credentialId')
+    expect(proxy).not.toHaveProperty('password')
+    expect(JSON.stringify(proxy)).not.toContain(password)
+    expect(store.getProxyPassword(proxy.id)).toBe(password)
+
+    await store.close()
+    const databasePath = join(directory, SQLITE_DATABASE_FILENAME)
+    const persisted = await readFile(databasePath)
+    expect(persisted.includes(Buffer.from(password, 'utf8'))).toBe(false)
+    const database = new DatabaseSync(databasePath, { readOnly: true })
+    const storedProxy = JSON.parse((database.prepare('SELECT payload FROM proxies WHERE id = ?').get(proxy.id) as {
+      payload: string
+    }).payload) as { credentialId?: string }
+    expect(storedProxy.credentialId).toBeTruthy()
+    expect(database.prepare('SELECT encrypted_value FROM credentials WHERE id = ?').get(storedProxy.credentialId) as {
+      encrypted_value: string
+    }).toEqual({ encrypted_value: Buffer.from(`vault:${password}`, 'utf8').toString('base64') })
+    database.close()
+
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getProxyPassword(proxy.id)).toBe(password)
+    const renamed = await restarted.saveProxy({
+      id: proxy.id,
+      name: 'Renamed SOCKS',
+      protocol: 'socks5',
+      host: '127.0.0.1',
+      port: 1080,
+      username: 'proxy-user'
+    })
+    expect(renamed.proxies[0]).toMatchObject({ name: 'Renamed SOCKS', hasPassword: true })
+    expect(restarted.getProxyPassword(proxy.id)).toBe(password)
+
+    const cleared = await restarted.saveProxy({
+      id: proxy.id,
+      name: 'Renamed SOCKS',
+      protocol: 'socks5',
+      host: '127.0.0.1',
+      port: 1080,
+      username: 'proxy-user',
+      clearPassword: true
+    })
+    expect(cleared.proxies[0]).toMatchObject({ hasPassword: false, status: 'unchecked' })
+    expect(restarted.getProxyPassword(proxy.id)).toBeUndefined()
+    expect((await restarted.deleteProxy(proxy.id)).proxies).toHaveLength(0)
+  })
+
+  it('protects proxies referenced by accounts and pools', async () => {
+    const store = createStore()
+    await store.initialize()
+    const withProxy = await store.saveProxy({
+      name: 'Shared proxy',
+      protocol: 'http',
+      host: 'localhost',
+      port: 8080
+    })
+    const proxyId = withProxy.proxies[0].id
+    const withAccount = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Proxied account',
+      credential: 'sk-proxied',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: [],
+      proxyId
+    })
+    const account = withAccount.accounts[0]
+    const withPool = await store.savePool({
+      name: 'Proxied pool',
+      protocol: 'openai-responses',
+      strategy: 'priority',
+      accountIds: [account.id],
+      stickySessions: false,
+      stickyTtlMinutes: 30,
+      maxRetries: 1,
+      proxyId
+    })
+    const pool = withPool.pools[0]
+
+    await expect(store.deleteProxy(proxyId)).rejects.toThrow(/accounts/)
+    await store.saveAccount({
+      id: account.id,
+      providerId: account.providerId,
+      name: account.name,
+      priority: account.priority,
+      weight: account.weight,
+      maxConcurrency: account.maxConcurrency,
+      modelAllowlist: account.modelAllowlist,
+      proxyId: ''
+    })
+    await expect(store.deleteProxy(proxyId)).rejects.toThrow(/pools/)
+    await store.savePool({
+      id: pool.id,
+      name: pool.name,
+      protocol: pool.protocol,
+      strategy: pool.strategy,
+      accountIds: pool.members.map((member) => member.accountId),
+      stickySessions: pool.stickySessions,
+      stickyTtlMinutes: pool.stickyTtlMinutes,
+      maxRetries: pool.maxRetries,
+      proxyId: ''
+    })
+    expect((await store.deleteProxy(proxyId)).proxies).toHaveLength(0)
+  })
+
+  it('rejects insecure remote providers and non-loopback gateway hosts', async () => {
+    const store = createStore()
+    await store.initialize()
+
+    await expect(store.saveProvider({
+      name: 'Remote HTTP',
+      kind: 'openai-compatible',
+      baseUrl: 'http://example.com/v1',
+      protocol: 'openai-chat',
+      models: []
+    })).rejects.toThrow(/HTTPS/)
+
+    await expect(store.updateGateway({
+      host: '0.0.0.0',
+      port: 15721,
+      autoStart: false,
+      logPayloads: false,
+      requestTimeoutSeconds: 120
+    })).rejects.toThrow(/loopback/)
+  })
+
+  it('only accepts accounts whose provider protocol matches the pool', async () => {
+    const store = createStore()
+    await store.initialize()
+    const snapshot = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'OpenAI key',
+      credential: 'sk-test',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+
+    await expect(store.savePool({
+      name: 'Wrong protocol',
+      protocol: 'anthropic-messages',
+      strategy: 'priority',
+      accountIds: [snapshot.accounts[0].id],
+      stickySessions: false,
+      stickyTtlMinutes: 30,
+      maxRetries: 1
+    })).rejects.toThrow(/pool protocol/)
+  })
+
+  it('requires a new credential when moving an account to another provider', async () => {
+    const store = createStore()
+    await store.initialize()
+    const snapshot = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Movable key',
+      credential: 'openai-secret',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+
+    await expect(store.saveAccount({
+      id: snapshot.accounts[0].id,
+      providerId: 'provider-anthropic',
+      name: 'Movable key',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })).rejects.toThrow(/new credential/)
+    expect(store.getCredential(store.getRuntimeAccount(snapshot.accounts[0].id)!.credentialId)).toBe('openai-secret')
+  })
+
+  it('preserves health on metadata edits and resets it when the credential changes', async () => {
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Cooling key',
+      credential: 'old-secret',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+    const account = created.accounts[0]
+    await store.setAccountCheckResult(account.id, {
+      status: 'cooldown',
+      circuitState: 'open',
+      consecutiveFailures: 3,
+      cooldownUntil: Date.now() + 60_000,
+      lastError: 'rate limited'
+    })
+
+    const edited = await store.saveAccount({
+      id: account.id,
+      providerId: account.providerId,
+      name: 'Renamed key',
+      priority: 2,
+      weight: 3,
+      maxConcurrency: 2,
+      modelAllowlist: []
+    })
+    expect(edited.accounts[0]).toMatchObject({
+      status: 'cooldown',
+      circuitState: 'open',
+      consecutiveFailures: 3,
+      lastError: 'rate limited'
+    })
+
+    const rekeyed = await store.saveAccount({
+      id: account.id,
+      providerId: account.providerId,
+      name: 'Renamed key',
+      credential: 'new-secret',
+      priority: 2,
+      weight: 3,
+      maxConcurrency: 2,
+      modelAllowlist: []
+    })
+    expect(rekeyed.accounts[0]).toMatchObject({
+      status: 'active',
+      circuitState: 'closed',
+      consecutiveFailures: 0,
+      cooldownUntil: undefined,
+      lastError: undefined
+    })
+  })
+
+  it('allows disabled client routes to remain unassigned during setup', async () => {
+    const store = createStore()
+    await store.initialize()
+    const route = store.getSnapshot().routes.find((candidate) => candidate.client === 'claude')!
+
+    const snapshot = await store.updateRoute({ ...route, poolId: '', enabled: false })
+    expect(snapshot.routes.find((candidate) => candidate.id === route.id)).toMatchObject({
+      enabled: false,
+      poolId: ''
+    })
+  })
+
+  it('keeps every coding client route on its native inbound protocol', async () => {
+    const store = createStore()
+    await store.initialize()
+    const route = store.getSnapshot().routes.find((candidate) => candidate.client === 'claude')!
+
+    await expect(store.updateRoute({ ...route, inboundProtocol: 'openai-chat' }))
+      .rejects.toThrow(/native inbound protocol/)
+  })
+
+  it('persists custom client profiles and protects the default profiles', async () => {
+    const store = createStore()
+    await store.initialize()
+    const saved = await store.saveClientProfile({
+      name: 'Work Codex',
+      client: 'codex',
+      directory: join(directory, 'work-codex'),
+      backupRetention: 7
+    })
+    const profile = saved.clientProfiles.find((candidate) => candidate.name === 'Work Codex')!
+    expect(profile).toMatchObject({ client: 'codex', backupRetention: 7, isDefault: false })
+
+    await store.close()
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().clientProfiles).toContainEqual(expect.objectContaining({ id: profile.id }))
+    await restarted.deleteClientProfile(profile.id)
+    expect(restarted.getSnapshot().clientProfiles.some((candidate) => candidate.id === profile.id)).toBe(false)
+    await expect(restarted.deleteClientProfile('default-codex')).rejects.toThrow(/Default/)
+    await expect(restarted.saveClientProfile({
+      id: 'default-codex',
+      name: 'Mutated default',
+      client: 'codex',
+      backupRetention: 1
+    })).rejects.toThrow(/Default/)
+    await expect(restarted.saveClientProfile({
+      name: 'Relative path',
+      client: 'codex',
+      directory: 'relative/codex',
+      backupRetention: 5
+    })).rejects.toThrow(/absolute/)
+  })
+
+  it('imports and exports value-free client profile bundles', async () => {
+    const store = createStore()
+    await store.initialize()
+    const saved = await store.saveClientProfile({
+      name: 'Portable Codex',
+      client: 'codex',
+      directory: join(directory, 'portable-codex'),
+      backupRetention: 6
+    })
+    const profile = saved.clientProfiles.find((candidate) => candidate.name === 'Portable Codex')!
+    const bundle = store.exportClientProfile(profile.id)
+    expect(bundle).toEqual({
+      format: 'stone-client-profile',
+      version: 1,
+      profile: expect.objectContaining({ name: 'Portable Codex', client: 'codex', backupRetention: 6 })
+    })
+    expect(JSON.stringify(bundle)).not.toContain('token')
+
+    const imported = await store.importClientProfile({
+      ...bundle,
+      profile: { ...bundle.profile, name: 'Imported Codex' }
+    })
+    expect(imported.clientProfiles).toContainEqual(expect.objectContaining({ name: 'Imported Codex', client: 'codex' }))
+    await expect(store.importClientProfile({ format: 'unknown' })).rejects.toThrow(/Unsupported/)
+  })
+
+  it('onboards a preset provider and account atomically', async () => {
+    const store = createStore()
+    await store.initialize()
+    const before = store.getSnapshot()
+    const snapshot = await store.onboardProvider({
+      preset: {
+        name: 'DeepSeek',
+        kind: 'openai-compatible',
+        baseUrl: 'https://api.deepseek.com/v1',
+        protocol: 'openai-chat',
+        models: ['deepseek-chat']
+      },
+      accountName: 'Primary',
+      credential: 'deepseek-secret'
+    })
+    const provider = snapshot.providers.find((candidate) => candidate.name === 'DeepSeek')!
+    const account = snapshot.accounts.find((candidate) => candidate.providerId === provider.id)!
+    expect(account).toMatchObject({ name: 'Primary', maskedCredential: '****cret' })
+    expect(store.getCredential(store.getRuntimeAccount(account.id)!.credentialId)).toBe('deepseek-secret')
+    await expect(store.onboardProvider({
+      preset: { name: 'Bad', kind: 'openai', baseUrl: 'https://api.openai.com/v1', protocol: 'gemini', models: [] },
+      accountName: 'Never', credential: 'secret'
+    })).rejects.toThrow(/not supported/)
+    expect(store.getSnapshot().providers).toHaveLength(before.providers.length + 1)
+  })
+
+  it('imports ChatGPT OAuth sessions as encrypted Codex accounts', async () => {
+    const store = createStore()
+    await store.initialize()
+    const expiresAt = Date.now() + 3_600_000
+    const content = JSON.stringify({
+      access_token: 'oauth-access-private',
+      refresh_token: '',
+      account_id: 'acct-team-import',
+      email: 'team@example.com',
+      expired: new Date(expiresAt).toISOString()
+    })
+    const imported = await store.importChatGptAccounts({ providerId: 'provider-openai', content })
+    const account = imported.snapshot.accounts.find((candidate) => candidate.id === imported.importedAccountIds[0])!
+    expect(account).toMatchObject({
+      credentialType: 'chatgpt-oauth',
+      name: 'team@example.com', renewable: false, maskedCredential: 'chatgpt-****port'
+    })
+    expect(account).not.toHaveProperty('chatgptAccountId')
+    expect(account).not.toHaveProperty('credentialId')
+    expect(JSON.stringify(imported.snapshot)).not.toContain('oauth-access-private')
+    expect(JSON.stringify(imported.snapshot)).not.toContain('acct-team-import')
+    expect(store.getChatGptCredential(store.getRuntimeAccount(account.id)!.credentialId)).toMatchObject({ accessToken: 'oauth-access-private', accountId: 'acct-team-import' })
+    expect(imported.warnings).toHaveLength(1)
+  })
+
+  it('allows OAuth accounts to bind a proxy and preserves the binding when reimported', async () => {
+    const store = createStore()
+    await store.initialize()
+    const withProxy = await store.saveProxy({
+      name: 'OAuth proxy',
+      protocol: 'https',
+      host: '127.0.0.1',
+      port: 8443,
+      username: 'oauth-proxy-user',
+      password: 'oauth-proxy-password-private'
+    })
+    const proxyId = withProxy.proxies[0].id
+    const accountId = 'acct-oauth-proxy-binding'
+    const first = await store.importChatGptAccounts({
+      providerId: 'provider-openai',
+      content: JSON.stringify({
+        access_token: 'oauth-access-before-reimport',
+        refresh_token: 'oauth-refresh-before-reimport',
+        account_id: accountId,
+        email: 'before@example.com',
+        expired: new Date(Date.now() + 3_600_000).toISOString()
+      })
+    })
+    const imported = first.snapshot.accounts.find((account) => account.id === first.importedAccountIds[0])!
+    const bound = await store.saveAccount({
+      id: imported.id,
+      providerId: imported.providerId,
+      name: 'Bound OAuth account',
+      priority: 7,
+      weight: 8,
+      maxConcurrency: 3,
+      modelAllowlist: ['gpt-5'],
+      proxyId
+    })
+    expect(bound.accounts.find((account) => account.id === imported.id)).toMatchObject({
+      proxyId,
+      priority: 7,
+      weight: 8,
+      maxConcurrency: 3
+    })
+
+    const secondAccessToken = 'oauth-access-after-reimport'
+    const secondRefreshToken = 'oauth-refresh-after-reimport'
+    const reimported = await store.importChatGptAccounts({
+      providerId: 'provider-openai',
+      content: JSON.stringify({
+        access_token: secondAccessToken,
+        refresh_token: secondRefreshToken,
+        account_id: accountId,
+        email: 'after@example.com',
+        expired: new Date(Date.now() + 7_200_000).toISOString()
+      })
+    })
+    const account = reimported.snapshot.accounts.find((candidate) => candidate.id === imported.id)!
+    expect(reimported.importedAccountIds).toEqual([imported.id])
+    expect(account).toMatchObject({ proxyId, priority: 7, weight: 8, maxConcurrency: 3 })
+    expect(store.getChatGptCredential(store.getRuntimeAccount(account.id)!.credentialId)).toMatchObject({
+      accessToken: secondAccessToken,
+      refreshToken: secondRefreshToken,
+      accountId
+    })
+    const serialized = JSON.stringify(reimported.snapshot)
+    expect(serialized).not.toContain(secondAccessToken)
+    expect(serialized).not.toContain(secondRefreshToken)
+    expect(serialized).not.toContain(accountId)
+    expect(reimported.snapshot.proxies[0]).not.toHaveProperty('credentialId')
+    expect(reimported.snapshot.proxies[0]).not.toHaveProperty('password')
+  })
+
+  it('stores Codex quota history in five-minute buckets and clears it with the account', async () => {
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Quota account',
+      credential: 'sk-quota',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+    const accountId = created.accounts[0].id
+    const bucketStart = 1_800_000_000_000
+    await store.setAccountCheckResult(accountId, {
+      codexQuota: {
+        fiveHour: { usedPercent: 10, resetAt: bucketStart + 18_000_000 },
+        sevenDay: { usedPercent: 20, resetAt: bucketStart + 604_800_000 },
+        observedAt: bucketStart + 30_000,
+        source: 'response-headers'
+      }
+    })
+    await store.setAccountCheckResult(accountId, {
+      codexQuota: {
+        fiveHour: { usedPercent: 35, resetAt: bucketStart + 18_000_000 },
+        sevenDay: { usedPercent: 45, resetAt: bucketStart + 604_800_000 },
+        observedAt: bucketStart + 240_000,
+        source: 'usage-endpoint'
+      }
+    })
+    await store.setAccountCheckResult(accountId, {
+      codexQuota: {
+        fiveHour: { usedPercent: 50, resetAt: bucketStart + 18_300_000 },
+        sevenDay: { usedPercent: 60, resetAt: bucketStart + 605_100_000 },
+        observedAt: bucketStart + 330_000,
+        source: 'response-headers'
+      }
+    })
+
+    expect(store.getAccountCodexQuotaHistory(accountId, bucketStart, bucketStart + 600_000)).toEqual([
+      {
+        accountId,
+        observedAt: bucketStart + 240_000,
+        fiveHourUsedPercent: 35,
+        fiveHourResetAt: bucketStart + 18_000_000,
+        sevenDayUsedPercent: 45,
+        sevenDayResetAt: bucketStart + 604_800_000,
+        source: 'usage-endpoint'
+      },
+      {
+        accountId,
+        observedAt: bucketStart + 330_000,
+        fiveHourUsedPercent: 50,
+        fiveHourResetAt: bucketStart + 18_300_000,
+        sevenDayUsedPercent: 60,
+        sevenDayResetAt: bucketStart + 605_100_000,
+        source: 'response-headers'
+      }
+    ])
+
+    await store.close()
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getAccountCodexQuotaHistory(accountId, bucketStart, bucketStart + 600_000)).toHaveLength(2)
+    await restarted.deleteAccount(accountId)
+    expect(restarted.getAccountCodexQuotaHistory(accountId, bucketStart, bucketStart + 600_000)).toEqual([])
+    const database = new DatabaseSync(join(directory, SQLITE_DATABASE_FILENAME), { readOnly: true })
+    expect(database.prepare('SELECT COUNT(*) AS count FROM account_codex_quota_samples WHERE account_id = ?').get(accountId))
+      .toEqual({ count: 0 })
+    database.close()
+  })
+
+  it('redacts credentials and authentication material before messages are persisted', async () => {
+    const store = createStore()
+    await store.initialize()
+    const accessToken = 'oauth-access-renderer-private'
+    const accountId = 'acct-renderer-private'
+    const proxyPassword = 'proxy-error-password-private'
+    const genericBearer = 'unregistered-bearer-private'
+    await store.saveProxy({
+      name: 'Error proxy', protocol: 'socks5', host: '127.0.0.1', port: 1080,
+      username: 'proxy-user', password: proxyPassword
+    })
+    const imported = await store.importChatGptAccounts({
+      providerId: 'provider-openai',
+      content: JSON.stringify({
+        access_token: accessToken,
+        account_id: accountId,
+        expired: new Date(Date.now() + 3_600_000).toISOString()
+      })
+    })
+    const account = imported.snapshot.accounts.find((candidate) => candidate.id === imported.importedAccountIds[0])!
+    const routeToken = imported.snapshot.routes[0].localToken
+    await store.setAccountCheckResult(account.id, {
+      lastError: `Rejected ${accessToken} for ${accountId}; Bearer ${genericBearer}`
+    })
+    await store.appendLog({
+      ...requestLog(401, 'secret-log'),
+      accountId: account.id,
+      error: `Proxy http://proxy-user:${proxyPassword}@127.0.0.1 failed`
+    })
+    await store.appendHealthEvent({
+      id: 'secret-health', timestamp: Date.now(), accountId: account.id, accountName: account.name,
+      providerName: 'OpenAI', kind: 'account-disabled', severity: 'error',
+      message: `Health ${accessToken} ${accountId}; password=${proxyPassword}; credential=${routeToken}`
+    })
+
+    const safeSnapshot = store.getSnapshot()
+    const serialized = JSON.stringify({
+      accountError: safeSnapshot.accounts.find((candidate) => candidate.id === account.id)?.lastError,
+      logError: safeSnapshot.requestLogs.find((log) => log.id === 'secret-log')?.error,
+      healthMessage: safeSnapshot.healthEvents.find((event) => event.id === 'secret-health')?.message
+    })
+    for (const secret of [accessToken, accountId, proxyPassword, genericBearer, routeToken]) {
+      expect(serialized).not.toContain(secret)
+    }
+    expect(serialized).toContain('[REDACTED]')
+
+    await store.close()
+    const database = new DatabaseSync(join(directory, SQLITE_DATABASE_FILENAME), { readOnly: true })
+    const accountRow = database.prepare('SELECT payload FROM accounts WHERE id = ?').get(account.id) as { payload: string }
+    const logRow = database.prepare('SELECT payload FROM request_logs WHERE id = ?').get('secret-log') as { payload: string }
+    const healthRow = database.prepare('SELECT payload FROM health_events WHERE id = ?').get('secret-health') as { payload: string }
+    const persisted = JSON.stringify({
+      accountError: (JSON.parse(accountRow.payload) as { lastError?: string }).lastError,
+      logError: (JSON.parse(logRow.payload) as { error?: string }).error,
+      healthMessage: (JSON.parse(healthRow.payload) as { message?: string }).message
+    })
+    database.close()
+    for (const secret of [accessToken, accountId, proxyPassword, genericBearer, routeToken]) {
+      expect(persisted).not.toContain(secret)
+    }
+    expect(persisted).toContain('[REDACTED]')
+  })
+
+  it('persists health events and exposes hourly observability buckets', async () => {
+    const store = createStore()
+    await store.initialize()
+    await store.appendHealthEvent({
+      id: 'health-one', timestamp: Date.now(), accountId: 'account-one', accountName: 'Primary',
+      providerName: 'Provider', kind: 'account-cooldown', severity: 'warning', message: 'Cooling down'
+    })
+    await store.appendLog({ ...requestLog(1, 'hourly-log'), timestamp: Date.now(), inputTokens: 4 })
+    await store.close()
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().healthEvents).toContainEqual(expect.objectContaining({ id: 'health-one' }))
+    expect(restarted.getSnapshot().observability.hourly).toHaveLength(24)
+    expect(restarted.getSnapshot().observability.hourly.at(-1)).toMatchObject({ requestCount: 1, inputTokens: 4 })
+  })
+
+  it('does not allow an existing client profile to change clients', async () => {
+    const store = createStore()
+    await store.initialize()
+    const originalDirectory = join(directory, 'work-codex')
+    const saved = await store.saveClientProfile({
+      name: 'Work Codex',
+      client: 'codex',
+      directory: originalDirectory,
+      backupRetention: 7
+    })
+    const original = saved.clientProfiles.find((candidate) => candidate.name === 'Work Codex')!
+
+    await expect(store.saveClientProfile({
+      id: original.id,
+      name: 'Moved to Claude',
+      client: 'claude',
+      directory: join(directory, 'work-claude'),
+      backupRetention: 3
+    })).rejects.toThrow(/cannot change its client/)
+
+    expect(store.getSnapshot().clientProfiles.find((candidate) => candidate.id === original.id)).toMatchObject({
+      name: 'Work Codex',
+      client: 'codex',
+      directory: originalDirectory,
+      backupRetention: 7,
+      updatedAt: original.updatedAt
+    })
+
+    await store.close()
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().clientProfiles.find((candidate) => candidate.id === original.id)).toMatchObject({
+      name: 'Work Codex',
+      client: 'codex',
+      directory: originalDirectory,
+      backupRetention: 7,
+      updatedAt: original.updatedAt
+    })
+  })
+
+  it('blocks destructive deletes while configuration objects are still referenced', async () => {
+    const store = createStore()
+    await store.initialize()
+    const withAccount = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Referenced key',
+      credential: 'sk-test',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+    const accountId = withAccount.accounts[0].id
+    await expect(store.deleteProvider('provider-openai')).rejects.toThrow(/accounts/)
+
+    const withPool = await store.savePool({
+      name: 'Referenced pool',
+      protocol: 'openai-responses',
+      strategy: 'priority',
+      accountIds: [accountId],
+      stickySessions: false,
+      stickyTtlMinutes: 30,
+      maxRetries: 1
+    })
+    await expect(store.deleteAccount(accountId)).rejects.toThrow(/pools/)
+
+    const route = withPool.routes.find((candidate) => candidate.client === 'codex')!
+    await store.updateRoute({ ...route, poolId: withPool.pools[0].id, enabled: false })
+    await expect(store.deletePool(withPool.pools[0].id)).rejects.toThrow(/routes/)
+  })
+
+  it('imports legacy JSON once, retains a backup, and does not import a later source again', async () => {
+    const legacy = legacyJsonState()
+    const legacyPath = join(directory, LEGACY_JSON_FILENAME)
+    await writeFile(legacyPath, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8')
+
+    const store = createStore()
+    await store.initialize()
+    expect(store.getSnapshot()).toMatchObject({
+      providers: [{ id: 'legacy-provider', name: 'Legacy Provider' }],
+      accounts: [{ id: 'legacy-account', maskedCredential: '****cret' }],
+      requestLogs: [{ id: 'legacy-log' }],
+      clientProfiles: [
+        { id: 'default-claude' },
+        { id: 'default-codex' },
+        { id: 'default-gemini' }
+      ]
+    })
+    expect(store.getCredential('legacy-credential')).toBe('legacy-secret')
+    await store.close()
+
+    const files = await readdir(directory)
+    const backupName = files.find((name) => name.startsWith(`${LEGACY_JSON_FILENAME}.migrated`) && name.endsWith('.bak'))
+    expect(backupName).toBeDefined()
+    expect(JSON.parse(await readFile(join(directory, backupName!), 'utf8'))).toEqual(legacy)
+
+    const markerDatabase = new DatabaseSync(join(directory, SQLITE_DATABASE_FILENAME))
+    const marker = markerDatabase.prepare("SELECT value FROM app_metadata WHERE key = 'legacy_json_import'").get() as
+      | { value: string }
+      | undefined
+    markerDatabase.close()
+    expect(JSON.parse(marker?.value ?? '{}')).toMatchObject({ source: legacyPath })
+
+    await writeFile(legacyPath, `${JSON.stringify({ ...legacy, providers: [] })}\n`, 'utf8')
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().providers).toHaveLength(1)
+    expect(restarted.getSnapshot().providers[0].id).toBe('legacy-provider')
+  })
+
+  it('serializes concurrent updates and retains only the newest 500 logs after restart', async () => {
+    const store = createStore()
+    await store.initialize()
+
+    await Promise.all(Array.from({ length: 12 }, (_, index) => store.saveProvider({
+      name: `Compatible ${index}`,
+      kind: 'openai-compatible',
+      baseUrl: `https://provider-${index}.example.test/v1`,
+      protocol: 'openai-chat',
+      models: []
+    })))
+    await store.close()
+
+    const stateStore = createStateStore(legacyState())
+    await stateStore.initialize()
+    await stateStore.update((state) => {
+      state.requestLogs = Array.from({ length: 510 }, (_, index) => requestLog(509 - index))
+    })
+    await stateStore.close()
+
+    const restarted = createStore()
+    await restarted.initialize()
+    const snapshot = restarted.getSnapshot()
+    expect(snapshot.providers.filter((provider) => provider.name.startsWith('Compatible '))).toHaveLength(12)
+    expect(snapshot.requestLogs).toHaveLength(500)
+    expect(snapshot.requestLogs[0].id).toBe('log-509')
+    expect(snapshot.requestLogs.at(-1)?.id).toBe('log-10')
+  })
+
+  it('persists account model catalogs and validates a selected pool against the member union', async () => {
+    const store = createStore()
+    await store.initialize()
+    const first = await store.saveAccount({
+      providerId: 'provider-openai', name: 'GPT primary', credential: 'primary-secret',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: []
+    })
+    const firstId = first.accounts.find((account) => account.name === 'GPT primary')!.id
+    await store.setAccountModels(firstId, ['gpt-5.5'])
+
+    const second = await store.saveAccount({
+      providerId: 'provider-openai', name: 'GPT expanded', credential: 'expanded-secret',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: []
+    })
+    const secondId = second.accounts.find((account) => account.name === 'GPT expanded')!.id
+    await store.setAccountModels(secondId, ['gpt-5.5', 'gpt-5.5-mini'])
+
+    const saved = await store.savePool({
+      name: 'GPT union', protocol: 'openai-responses', strategy: 'balanced',
+      accountIds: [firstId, secondId], modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5', 'gpt-5.5-mini'],
+      stickySessions: false, stickyTtlMinutes: 30, maxRetries: 1
+    })
+    expect(saved.pools.find((pool) => pool.name === 'GPT union')).toMatchObject({
+      modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5', 'gpt-5.5-mini']
+    })
+    await expect(store.savePool({
+      name: 'Invalid union', protocol: 'openai-responses', strategy: 'balanced',
+      accountIds: [firstId, secondId], modelPolicy: 'selected', modelAllowlist: ['gpt-unavailable'],
+      stickySessions: false, stickyTtlMinutes: 30, maxRetries: 1
+    })).rejects.toThrow(/not available from its accounts/)
+
+    await store.close()
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().accounts.find((account) => account.id === secondId)).toMatchObject({
+      availableModels: ['gpt-5.5', 'gpt-5.5-mini'],
+      modelPolicy: 'all'
+    })
+    expect(restarted.getSnapshot().pools.find((pool) => pool.name === 'GPT union')?.modelAllowlist)
+      .toEqual(['gpt-5.5', 'gpt-5.5-mini'])
+  })
+
+  it('prunes selected account and pool models transactionally after an authoritative refresh', async () => {
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveAccount({
+      providerId: 'provider-openai', name: 'Changing catalog', credential: 'catalog-secret',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: []
+    })
+    const accountId = created.accounts.find((account) => account.name === 'Changing catalog')!.id
+    await store.setAccountModels(accountId, ['gpt-5.5', 'gpt-5.5-mini'])
+    await store.saveAccount({
+      id: accountId, providerId: 'provider-openai', name: 'Changing catalog',
+      priority: 1, weight: 1, maxConcurrency: 1, modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5', 'gpt-5.5-mini']
+    })
+    await store.savePool({
+      name: 'Changing pool', protocol: 'openai-responses', strategy: 'priority',
+      accountIds: [accountId], modelPolicy: 'selected', modelAllowlist: ['gpt-5.5', 'gpt-5.5-mini'],
+      stickySessions: false, stickyTtlMinutes: 30, maxRetries: 1
+    })
+
+    const refreshed = await store.setAccountModels(accountId, ['gpt-5.5', 'gpt-5.5-nano'])
+    expect(refreshed.accounts.find((account) => account.id === accountId)).toMatchObject({
+      availableModels: ['gpt-5.5', 'gpt-5.5-nano'],
+      modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5']
+    })
+    expect(refreshed.pools.find((pool) => pool.name === 'Changing pool')).toMatchObject({
+      modelPolicy: 'selected',
+      modelAllowlist: ['gpt-5.5']
+    })
+  })
+
+  it('rejects stale account model discovery after account or provider configuration changes', async () => {
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveAccount({
+      providerId: 'provider-openai', name: 'Revision account', credential: 'revision-secret-one',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: []
+    })
+    const account = created.accounts.find((candidate) => candidate.name === 'Revision account')!
+    const beforeCredentialChange = store.getAccountModelDiscoveryFingerprint(account.id)
+
+    await store.saveAccount({
+      id: account.id, providerId: account.providerId, name: account.name,
+      credential: 'revision-secret-two', priority: 1, weight: 1, maxConcurrency: 1,
+      modelPolicy: 'all', modelAllowlist: []
+    })
+    await expect(store.setAccountModels(account.id, ['stale-credential-model'], beforeCredentialChange))
+      .rejects.toThrow(/configuration changed while models were refreshing/)
+    expect(store.getSnapshot().accounts.find((candidate) => candidate.id === account.id)).toMatchObject({
+      availableModels: [], modelsRefreshedAt: undefined
+    })
+
+    const beforeProviderChange = store.getAccountModelDiscoveryFingerprint(account.id)
+    const provider = store.getSnapshot().providers.find((candidate) => candidate.id === account.providerId)!
+    await store.saveProvider({
+      id: provider.id,
+      name: provider.name,
+      kind: provider.kind,
+      baseUrl: 'https://api.openai.com/v2',
+      protocol: provider.protocol,
+      models: provider.models
+    })
+    await expect(store.setAccountModels(account.id, ['stale-provider-model'], beforeProviderChange))
+      .rejects.toThrow(/configuration changed while models were refreshing/)
+  })
+
+  it('keeps the discovery fingerprint stable across internal OAuth token rotation', async () => {
+    const store = createStore()
+    await store.initialize()
+    const accountId = 'acct-oauth-model-revision'
+    const imported = await store.importChatGptAccounts({
+      providerId: 'provider-openai',
+      content: JSON.stringify({
+        access_token: 'oauth-model-access-one',
+        refresh_token: 'oauth-model-refresh-one',
+        account_id: accountId,
+        expired: new Date(Date.now() + 3_600_000).toISOString()
+      })
+    })
+    const id = imported.importedAccountIds[0]
+    const fingerprint = store.getAccountModelDiscoveryFingerprint(id)
+
+    await store.updateChatGptCredential(id, JSON.stringify({
+      accessToken: 'oauth-model-access-two',
+      refreshToken: 'oauth-model-refresh-two',
+      accountId,
+      expiresAt: Date.now() + 7_200_000
+    }))
+
+    expect(store.getAccountModelDiscoveryFingerprint(id)).toBe(fingerprint)
+    await expect(store.setAccountModels(id, ['gpt-oauth-current'], fingerprint)).resolves.toMatchObject({
+      accounts: [expect.objectContaining({ id, availableModels: ['gpt-oauth-current'] })]
+    })
+  })
+
+  it('does not prune selected pool models from non-authoritative provider fallback changes', async () => {
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveAccount({
+      providerId: 'provider-openai', name: 'Rotating key', credential: 'rotating-secret-one',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: []
+    })
+    const account = created.accounts.find((candidate) => candidate.name === 'Rotating key')!
+    await store.setAccountModels(account.id, ['account-only-model'])
+    await store.savePool({
+      name: 'Fallback-safe pool', protocol: 'openai-responses', strategy: 'priority',
+      accountIds: [account.id], modelPolicy: 'selected', modelAllowlist: ['account-only-model'],
+      stickySessions: false, stickyTtlMinutes: 30, maxRetries: 1
+    })
+
+    await store.saveAccount({
+      id: account.id, providerId: account.providerId, name: account.name,
+      credential: 'rotating-secret-two', priority: 1, weight: 1, maxConcurrency: 1,
+      modelPolicy: 'all', modelAllowlist: []
+    })
+    const provider = store.getSnapshot().providers.find((candidate) => candidate.id === account.providerId)!
+    await store.saveProvider({
+      id: provider.id, name: provider.name, kind: provider.kind,
+      baseUrl: provider.baseUrl, protocol: provider.protocol, models: ['fallback-replacement']
+    })
+    await store.setProviderModels(provider.id, ['another-fallback'])
+    expect(store.getSnapshot().pools.find((pool) => pool.name === 'Fallback-safe pool')).toMatchObject({
+      modelPolicy: 'selected', modelAllowlist: ['account-only-model']
+    })
+
+    const refreshed = await store.setAccountModels(account.id, ['authoritative-replacement'])
+    expect(refreshed.pools.find((pool) => pool.name === 'Fallback-safe pool')).toMatchObject({
+      modelPolicy: 'selected', modelAllowlist: []
+    })
+  })
+
+  it('normalizes legacy model fields without broadening a non-empty account allowlist', async () => {
+    const store = createStore()
+    await store.initialize()
+    const selected = await store.saveAccount({
+      providerId: 'provider-openai', name: 'Legacy selected', credential: 'legacy-selected-secret',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: ['legacy-model']
+    })
+    const selectedId = selected.accounts.find((account) => account.name === 'Legacy selected')!.id
+    const all = await store.saveAccount({
+      providerId: 'provider-openai', name: 'Legacy all', credential: 'legacy-all-secret',
+      priority: 1, weight: 1, maxConcurrency: 1, modelAllowlist: []
+    })
+    const allId = all.accounts.find((account) => account.name === 'Legacy all')!.id
+    const pooled = await store.savePool({
+      name: 'Legacy pool', protocol: 'openai-responses', strategy: 'priority',
+      accountIds: [selectedId, allId], stickySessions: false, stickyTtlMinutes: 30, maxRetries: 1
+    })
+    const poolId = pooled.pools.find((pool) => pool.name === 'Legacy pool')!.id
+    await store.close()
+
+    const databasePath = join(directory, SQLITE_DATABASE_FILENAME)
+    const database = new DatabaseSync(databasePath)
+    for (const accountId of [selectedId, allId]) {
+      const row = database.prepare('SELECT payload FROM accounts WHERE id = ?').get(accountId) as { payload: string }
+      const payload = JSON.parse(row.payload) as Record<string, unknown>
+      delete payload.availableModels
+      delete payload.modelsRefreshedAt
+      delete payload.modelPolicy
+      database.prepare('UPDATE accounts SET payload = ? WHERE id = ?').run(JSON.stringify(payload), accountId)
+    }
+    const poolRow = database.prepare('SELECT payload FROM pools WHERE id = ?').get(poolId) as { payload: string }
+    const poolPayload = JSON.parse(poolRow.payload) as Record<string, unknown>
+    delete poolPayload.modelPolicy
+    delete poolPayload.modelAllowlist
+    database.prepare('UPDATE pools SET payload = ? WHERE id = ?').run(JSON.stringify(poolPayload), poolId)
+    database.close()
+
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().accounts.find((account) => account.id === selectedId)).toMatchObject({
+      availableModels: [], modelPolicy: 'selected', modelAllowlist: ['legacy-model']
+    })
+    expect(restarted.getSnapshot().accounts.find((account) => account.id === allId)).toMatchObject({
+      availableModels: [], modelPolicy: 'all', modelAllowlist: []
+    })
+    expect(restarted.getSnapshot().pools.find((pool) => pool.id === poolId)).toMatchObject({
+      modelPolicy: 'all', modelAllowlist: []
+    })
+    await restarted.close()
+
+    const persisted = new DatabaseSync(databasePath, { readOnly: true })
+    const persistedAccount = JSON.parse((persisted.prepare('SELECT payload FROM accounts WHERE id = ?')
+      .get(selectedId) as { payload: string }).payload) as Record<string, unknown>
+    const persistedPool = JSON.parse((persisted.prepare('SELECT payload FROM pools WHERE id = ?')
+      .get(poolId) as { payload: string }).payload) as Record<string, unknown>
+    persisted.close()
+    expect(persistedAccount).toMatchObject({ availableModels: [], modelPolicy: 'selected' })
+    expect(persistedPool).toMatchObject({ modelPolicy: 'all', modelAllowlist: [] })
+  })
+
+  it('appends request logs incrementally and preserves observability across restarts', async () => {
+    const now = Date.now()
+    const store = createStore()
+    await store.initialize()
+    await store.appendLog({
+      ...requestLog(0, 'outside-window'),
+      timestamp: now - 8 * 24 * 60 * 60 * 1000
+    })
+    await store.appendLog({
+      ...requestLog(1, 'recent-success'),
+      timestamp: now - 60_000,
+      inputTokens: 12,
+      outputTokens: 5,
+      cachedInputTokens: 4,
+      reasoningTokens: 2,
+      failoverCount: 1
+    })
+    await store.appendLog({
+      ...requestLog(2, 'recent-error'),
+      timestamp: now - 120_000,
+      status: 'error',
+      statusCode: 429,
+      inputTokens: 3,
+      outputTokens: 1
+    })
+    await store.close()
+
+    const restarted = createStore()
+    await restarted.initialize()
+    const snapshot = restarted.getSnapshot()
+    expect(snapshot.requestLogs.map((log) => log.id)).toEqual(['recent-error', 'recent-success', 'outside-window'])
+    expect(snapshot.observability.last24Hours).toMatchObject({
+      requestCount: 2,
+      successCount: 1,
+      errorCount: 1,
+      inputTokens: 15,
+      outputTokens: 6,
+      cachedInputTokens: 4,
+      reasoningTokens: 2,
+      failoverCount: 1,
+      errorsByStatus: { 429: 1 }
+    })
+    expect(snapshot.observability.last7Days.requestCount).toBe(2)
+  })
+
+  it('rolls back a failed snapshot transaction and accepts the next queued update', async () => {
+    const initial = legacyState()
+    const store = createStateStore(initial)
+    await store.initialize()
+
+    await expect(store.update((state) => {
+      state.providers.push(structuredClone(state.providers[0]))
+    })).rejects.toThrow(/UNIQUE constraint failed/)
+    expect(store.read().providers).toHaveLength(1)
+
+    await store.update((state) => {
+      state.gateway.port = 17777
+    })
+    await store.close()
+
+    const restarted = createStateStore(legacyState())
+    await restarted.initialize()
+    expect(restarted.read().providers).toHaveLength(1)
+    expect(restarted.read().gateway.port).toBe(17777)
+  })
+
+  it('migrates an older SQLite schema without losing state', async () => {
+    const store = createStore()
+    await store.initialize()
+    await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Persisted before migration',
+      credential: 'migration-secret',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+    await store.close()
+
+    downgradeDatabaseToVersionOne(join(directory, SQLITE_DATABASE_FILENAME))
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().accounts).toHaveLength(1)
+    const restartedAccount = restarted.getSnapshot().accounts[0]
+    expect(restarted.getCredential(restarted.getRuntimeAccount(restartedAccount.id)!.credentialId)).toBe('migration-secret')
+    await restarted.close()
+
+    const database = new DatabaseSync(join(directory, SQLITE_DATABASE_FILENAME))
+    expect(readSchemaVersion(database)).toBe(SQLITE_SCHEMA_VERSION)
+    expect(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = 'accounts_ordinal_unique'").get())
+      .toEqual({ count: 1 })
+    expect(database.prepare('SELECT COUNT(*) AS count FROM client_profiles').get()).toEqual({ count: 3 })
+    database.close()
+  })
+
+  it('migrates schema four to schema five with proxy and Codex quota storage', async () => {
+    const store = createStore()
+    await store.initialize()
+    const created = await store.saveAccount({
+      providerId: 'provider-openai',
+      name: 'Schema four account',
+      credential: 'schema-four-secret',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 1,
+      modelAllowlist: []
+    })
+    await store.close()
+
+    const databasePath = join(directory, SQLITE_DATABASE_FILENAME)
+    downgradeDatabaseToVersionFour(databasePath)
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getSnapshot().accounts).toContainEqual(expect.objectContaining({ id: created.accounts[0].id }))
+    expect(restarted.getCredential(restarted.getRuntimeAccount(created.accounts[0].id)!.credentialId)).toBe('schema-four-secret')
+    expect(restarted.getSnapshot().proxies).toEqual([])
+    await restarted.close()
+
+    const database = new DatabaseSync(databasePath)
+    expect(readSchemaVersion(database)).toBe(5)
+    expect(database.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5').get())
+      .toEqual({ count: 1 })
+    expect(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'proxies'").get())
+      .toEqual({ count: 1 })
+    expect(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'account_codex_quota_samples'").get())
+      .toEqual({ count: 1 })
+    expect(database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = 'account_codex_quota_samples_observed'").get())
+      .toEqual({ count: 1 })
+    database.close()
+  })
+
+  it('rolls back a failed schema migration and leaves its source data intact', async () => {
+    const store = createStore()
+    await store.initialize()
+    await store.close()
+
+    const databasePath = join(directory, SQLITE_DATABASE_FILENAME)
+    downgradeDatabaseToVersionOne(databasePath)
+    const database = new DatabaseSync(databasePath)
+    database.exec('UPDATE providers SET ordinal = 0')
+    database.close()
+
+    const failingStore = createStore()
+    await expect(failingStore.initialize()).rejects.toThrow(/migration 2 failed/)
+
+    const inspected = new DatabaseSync(databasePath)
+    expect(readSchemaVersion(inspected)).toBe(1)
+    expect(inspected.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 2').get())
+      .toEqual({ count: 0 })
+    expect(inspected.prepare('SELECT COUNT(*) AS count FROM providers WHERE ordinal = 0').get())
+      .toEqual({ count: 3 })
+    expect(inspected.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = 'providers_ordinal_unique'").get())
+      .toEqual({ count: 0 })
+    inspected.close()
+  })
+})
+
+function legacyState(): PersistedState {
+  const timestamp = 1_700_000_000_000
+  return {
+    version: 1,
+    providers: [{
+      id: 'legacy-provider',
+      name: 'Legacy Provider',
+      kind: 'openai-compatible',
+      baseUrl: 'https://legacy.example.test/v1',
+      protocol: 'openai-chat',
+      models: ['legacy-model'],
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }],
+    accounts: [{
+      id: 'legacy-account',
+      providerId: 'legacy-provider',
+      name: 'Legacy Account',
+      credentialId: 'legacy-credential',
+      maskedCredential: '****cret',
+      status: 'active',
+      priority: 1,
+      weight: 1,
+      maxConcurrency: 2,
+      inFlight: 0,
+      modelAllowlist: [],
+      circuitState: 'closed',
+      consecutiveFailures: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }],
+    proxies: [],
+    pools: [{
+      id: 'legacy-pool',
+      name: 'Legacy Pool',
+      protocol: 'openai-chat',
+      strategy: 'priority',
+      members: [{ accountId: 'legacy-account', enabled: true }],
+      stickySessions: false,
+      stickyTtlMinutes: 30,
+      maxRetries: 1,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }],
+    routes: [{
+      id: 'legacy-route',
+      client: 'codex',
+      enabled: true,
+      poolId: 'legacy-pool',
+      inboundProtocol: 'openai-responses',
+      modelMap: { alias: 'legacy-model' },
+      localToken: 'legacy-local-token',
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }],
+    gateway: {
+      host: '127.0.0.1',
+      port: 15721,
+      autoStart: true,
+      logPayloads: false,
+      requestTimeoutSeconds: 90
+      ,launchAtLogin: false
+      ,desktopNotifications: true
+      ,automaticBackups: true
+      ,backupRetention: 10
+    },
+    requestLogs: [requestLog(0, 'legacy-log')],
+    credentials: {
+      'legacy-credential': Buffer.from('vault:legacy-secret', 'utf8').toString('base64')
+    },
+    clientProfiles: [],
+    healthEvents: []
+  }
+}
+
+function legacyJsonState(): Omit<PersistedState, 'clientProfiles'> {
+  const state = legacyState()
+  const { clientProfiles: _clientProfiles, ...legacy } = state
+  return legacy
+}
+
+function requestLog(index: number, id = `log-${index}`): RequestLog {
+  return {
+    id,
+    timestamp: 1_700_000_000_000 + index,
+    client: 'codex',
+    protocol: 'openai-responses',
+    providerName: 'Provider',
+    accountName: 'Account',
+    model: 'model',
+    status: 'success',
+    statusCode: 200,
+    latencyMs: index
+  }
+}
+
+function downgradeDatabaseToVersionOne(path: string): void {
+  const database = new DatabaseSync(path)
+  database.exec(`
+    DROP INDEX providers_ordinal_unique;
+    DROP INDEX accounts_ordinal_unique;
+    DROP INDEX pools_ordinal_unique;
+    DROP INDEX routes_ordinal_unique;
+    DROP INDEX request_logs_ordinal_unique;
+    DROP TABLE IF EXISTS client_profiles;
+    DROP TABLE IF EXISTS health_events;
+    DROP TABLE IF EXISTS proxies;
+    DROP TABLE IF EXISTS account_codex_quota_samples;
+    DELETE FROM schema_migrations WHERE version >= 2;
+    PRAGMA user_version = 1;
+  `)
+  database.close()
+}
+
+function downgradeDatabaseToVersionFour(path: string): void {
+  const database = new DatabaseSync(path)
+  database.exec(`
+    DROP TABLE proxies;
+    DROP TABLE account_codex_quota_samples;
+    DELETE FROM schema_migrations WHERE version >= 5;
+    PRAGMA user_version = 4;
+  `)
+  database.close()
+}
+
+function readSchemaVersion(database: DatabaseSync): number {
+  return (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+}
