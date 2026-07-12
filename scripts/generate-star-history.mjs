@@ -86,8 +86,8 @@ function renderStarHistory(repo, { createdAt, stars }) {
   const x = (timestamp) => plot.left + ((timestamp - createdAt) / timeSpan) * plotWidth
   const y = (count) => plot.top + plotHeight - (count / yMaximum) * plotHeight
   const points = [{ timestamp: createdAt, count: 0 }, ...stars.map((timestamp, index) => ({ timestamp, count: index + 1 }))]
-  const line = stepPath(points, x, y)
-  const area = `${line} H ${formatNumber(x(maximumTime))} V ${formatNumber(y(0))} H ${formatNumber(x(createdAt))} Z`
+  const line = `${stepPath(points, x, y)} H ${formatNumber(x(maximumTime))}`
+  const area = `${line} V ${formatNumber(y(0))} H ${formatNumber(x(createdAt))} Z`
   const finalPoint = points.at(-1)
   const xTicks = Array.from({ length: 5 }, (_, index) => createdAt + (timeSpan * index) / 4)
   const yTicks = Array.from({ length: 6 }, (_, index) => (yMaximum * index) / 5)
@@ -149,7 +149,14 @@ function niceMaximum(value) {
 function formatDate(timestamp, span) {
   const date = new Date(timestamp)
   if (span <= 2 * 24 * 60 * 60 * 1000) {
-    return new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' }).format(date)
+    return new Intl.DateTimeFormat('en', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'UTC'
+    }).format(date)
   }
   if (span <= 180 * 24 * 60 * 60 * 1000) {
     return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(date)
