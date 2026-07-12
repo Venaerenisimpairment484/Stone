@@ -36,13 +36,13 @@
   <text class="axis" x="62" y="235.2" text-anchor="end">3</text>
   <text class="axis" x="62" y="171.6" text-anchor="end">4</text>
   <text class="axis" x="62" y="108" text-anchor="end">5</text>
-  <text class="axis" x="74" y="452" text-anchor="middle">11:19</text>
-  <text class="axis" x="287" y="452" text-anchor="middle">17:19</text>
-  <text class="axis" x="500" y="452" text-anchor="middle">23:19</text>
-  <text class="axis" x="713" y="452" text-anchor="middle">05:19</text>
-  <text class="axis" x="926" y="452" text-anchor="middle">11:19</text>
+  <text class="axis" x="74" y="452" text-anchor="middle">Jul 12, 11:19</text>
+  <text class="axis" x="287" y="452" text-anchor="middle">Jul 12, 17:19</text>
+  <text class="axis" x="500" y="452" text-anchor="middle">Jul 12, 23:19</text>
+  <text class="axis" x="713" y="452" text-anchor="middle">Jul 13, 05:19</text>
+  <text class="axis" x="926" y="452" text-anchor="middle">Jul 13, 11:19</text>
   <path class="area" d="M 74 422 H 188.42 V 358.4 H 188.6 V 294.8 H 926 V 422 H 74 Z"/>
-  <path class="line" d="M 74 422 H 188.42 V 358.4 H 188.6 V 294.8"/>
+  <path class="line" d="M 74 422 H 188.42 V 358.4 H 188.6 V 294.8 H 926"/>
   <circle class="point" cx="188.6" cy="294.8" r="5"/>
   
 </svg>
