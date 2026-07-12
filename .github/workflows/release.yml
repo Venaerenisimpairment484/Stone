@@ -66,7 +66,9 @@ jobs:
             builder_args: --win nsis portable --x64
             artifact_path: |
               release/Stone-*-windows-x64-setup.exe
+              release/Stone-*-windows-x64-setup.exe.blockmap
               release/Stone-*-windows-x64-portable.exe
+              release/latest.yml
           - name: Linux x64
             id: linux-x64
             os: ubuntu-latest
@@ -74,6 +76,7 @@ jobs:
             artifact_path: |
               release/Stone-*-linux-x86_64.AppImage
               release/Stone-*-linux-amd64.deb
+              release/latest-linux.yml
           - name: Linux arm64
             id: linux-arm64
             os: ubuntu-24.04-arm
@@ -81,20 +84,21 @@ jobs:
             artifact_path: |
               release/Stone-*-linux-arm64.AppImage
               release/Stone-*-linux-arm64.deb
-          - name: macOS Intel
-            id: macos-x64
-            os: macos-15-intel
-            builder_args: --mac dmg zip --x64 --config.mac.identity=- --config.mac.hardenedRuntime=false
+              release/latest-linux-arm64.yml
+          - name: macOS Intel and Apple Silicon
+            id: macos
+            os: macos-15
+            builder_args: --mac dmg zip --x64 --arm64 --config.mac.identity=- --config.mac.hardenedRuntime=false
             artifact_path: |
               release/Stone-*-macos-x64.dmg
+              release/Stone-*-macos-x64.dmg.blockmap
               release/Stone-*-macos-x64.zip
-          - name: macOS Apple Silicon
-            id: macos-arm64
-            os: macos-15
-            builder_args: --mac dmg zip --arm64 --config.mac.identity=- --config.mac.hardenedRuntime=false
-            artifact_path: |
+              release/Stone-*-macos-x64.zip.blockmap
               release/Stone-*-macos-arm64.dmg
+              release/Stone-*-macos-arm64.dmg.blockmap
               release/Stone-*-macos-arm64.zip
+              release/Stone-*-macos-arm64.zip.blockmap
+              release/latest-mac.yml
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
@@ -135,13 +139,25 @@ jobs:
     name: Publish GitHub Release
     needs: package
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       PRERELEASE_INPUT: ${{ inputs.prerelease || false }}
     steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install metadata validation dependencies
+        run: npm ci
+
       - name: Download platform packages
         uses: actions/download-artifact@v4
         with:
@@ -149,21 +165,30 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Verify expected packages
+      - name: Verify expected updater assets
         shell: bash
         run: |
           version="${RELEASE_TAG#v}"
           expected=(
             "Stone-${version}-windows-x64-setup.exe"
+            "Stone-${version}-windows-x64-setup.exe.blockmap"
             "Stone-${version}-windows-x64-portable.exe"
             "Stone-${version}-linux-x86_64.AppImage"
             "Stone-${version}-linux-amd64.deb"
             "Stone-${version}-linux-arm64.AppImage"
             "Stone-${version}-linux-arm64.deb"
             "Stone-${version}-macos-x64.dmg"
+            "Stone-${version}-macos-x64.dmg.blockmap"
             "Stone-${version}-macos-x64.zip"
+            "Stone-${version}-macos-x64.zip.blockmap"
             "Stone-${version}-macos-arm64.dmg"
+            "Stone-${version}-macos-arm64.dmg.blockmap"
             "Stone-${version}-macos-arm64.zip"
+            "Stone-${version}-macos-arm64.zip.blockmap"
+            "latest.yml"
+            "latest-mac.yml"
+            "latest-linux.yml"
+            "latest-linux-arm64.yml"
           )
           for asset in "${expected[@]}"; do
             if [[ ! -f "release-assets/${asset}" ]]; then
@@ -177,31 +202,111 @@ jobs:
             exit 1
           fi
 
+      - name: Validate update metadata URLs and SHA-512 hashes
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto'
+          import { readFileSync, statSync } from 'node:fs'
+          import { join } from 'node:path'
+          import { load } from 'js-yaml'
+
+          const root = 'release-assets'
+          const version = process.env.RELEASE_TAG.replace(/^v/, '')
+          const manifests = {
+            'latest.yml': [
+              `Stone-${version}-windows-x64-setup.exe`,
+            ],
+            'latest-mac.yml': [
+              `Stone-${version}-macos-x64.dmg`,
+              `Stone-${version}-macos-x64.zip`,
+              `Stone-${version}-macos-arm64.dmg`,
+              `Stone-${version}-macos-arm64.zip`,
+            ],
+            'latest-linux.yml': [
+              `Stone-${version}-linux-x86_64.AppImage`,
+              `Stone-${version}-linux-amd64.deb`,
+            ],
+            'latest-linux-arm64.yml': [
+              `Stone-${version}-linux-arm64.AppImage`,
+              `Stone-${version}-linux-arm64.deb`,
+            ],
+          }
+
+          const sha512 = (file) => createHash('sha512').update(readFileSync(file)).digest('base64')
+
+          for (const [manifestName, expectedUrls] of Object.entries(manifests)) {
+            const manifest = load(readFileSync(join(root, manifestName), 'utf8'))
+            if (!manifest || manifest.version !== version || !Array.isArray(manifest.files)) {
+              throw new Error(`${manifestName} has an invalid version or files list.`)
+            }
+            const files = new Map(manifest.files.map((entry) => [entry.url, entry]))
+            if (files.size !== expectedUrls.length || expectedUrls.some((url) => !files.has(url))) {
+              throw new Error(`${manifestName} does not contain exactly the expected update URLs.`)
+            }
+            for (const url of expectedUrls) {
+              const assetPath = join(root, url)
+              const entry = files.get(url)
+              if (entry.sha512 !== sha512(assetPath)) {
+                throw new Error(`${manifestName} has an invalid SHA-512 hash for ${url}.`)
+              }
+              if (entry.size != null && entry.size !== statSync(assetPath).size) {
+                throw new Error(`${manifestName} has an invalid size for ${url}.`)
+              }
+            }
+            if (!files.has(manifest.path) || manifest.sha512 !== files.get(manifest.path).sha512) {
+              throw new Error(`${manifestName} has inconsistent legacy path or SHA-512 fields.`)
+            }
+          }
+          NODE
+
       - name: Generate SHA-256 checksums
         shell: bash
         run: |
           cd release-assets
-          sha256sum Stone-* > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | LC_ALL=C sort \
+            | xargs sha256sum > SHA256SUMS
 
-      - name: Create or update GitHub Release
+      - name: Create draft, upload assets, and publish GitHub Release
         shell: bash
         run: |
           assets=(release-assets/*)
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-            exit 0
+          release_state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ "$release_state" == 'false' ]]; then
+            echo "Release ${RELEASE_TAG} is already published; refusing to replace immutable updater assets." >&2
+            exit 1
           fi
 
-          release_args=(
-            "$RELEASE_TAG"
-            "${assets[@]}"
-            --repo "$GITHUB_REPOSITORY"
-            --target "$GITHUB_SHA"
-            --title "Stone ${RELEASE_TAG}"
-            --generate-notes
-            --notes $'> [!WARNING]\n> macOS artifacts are ad-hoc signed and are not Apple-notarized. Windows artifacts are unsigned. Linux credential storage requires a Secret Service-compatible keyring; AppImage may require FUSE 2.'
-          )
+          is_prerelease=false
           if [[ "$RELEASE_TAG" == *-* || "$PRERELEASE_INPUT" == 'true' ]]; then
-            release_args+=(--prerelease)
+            is_prerelease=true
           fi
-          gh release create "${release_args[@]}"
+
+          if [[ "$release_state" != 'true' ]]; then
+            create_args=(
+              "$RELEASE_TAG"
+              --draft
+              --repo "$GITHUB_REPOSITORY"
+              --target "$GITHUB_SHA"
+              --title "Stone ${RELEASE_TAG}"
+              --generate-notes
+              --notes $'> [!WARNING]\n> macOS artifacts are ad-hoc signed and are not Apple-notarized. Windows artifacts are unsigned. Linux credential storage requires a Secret Service-compatible keyring; AppImage may require FUSE 2.'
+            )
+            if [[ "$is_prerelease" == 'true' ]]; then
+              create_args+=(--prerelease)
+            fi
+            gh release create "${create_args[@]}"
+          fi
+
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+
+          mapfile -t local_assets < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t remote_assets < <(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+          if [[ "${local_assets[*]}" != "${remote_assets[*]}" ]]; then
+            echo 'Draft Release assets do not match the locally verified set.' >&2
+            diff <(printf '%s\n' "${local_assets[@]}") <(printf '%s\n' "${remote_assets[@]}") >&2 || true
+            exit 1
+          fi
+
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease="$is_prerelease"

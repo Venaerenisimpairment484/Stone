@@ -517,6 +517,46 @@ export interface AccountModelTestResult {
   responsePreview?: string
 }
 
+export type AppUpdateStatus =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'up-to-date'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'error'
+
+export interface AppUpdateRelease {
+  version: string
+  tagName: string
+  title: string
+  notes: string
+  publishedAt: string
+  url: string
+}
+
+export interface AppUpdateProgress {
+  percent: number
+  transferred: number
+  total: number
+  bytesPerSecond: number
+}
+
+export interface AppUpdateState {
+  revision: number
+  currentVersion: string
+  status: AppUpdateStatus
+  checkedAt?: number
+  ignoredVersion?: string
+  release?: AppUpdateRelease
+  progress?: AppUpdateProgress
+  automaticUpdateSupported: boolean
+  automaticUpdateReason?: string
+  error?: string
+}
+
 export interface GatewayApi {
   getSnapshot(): Promise<AppSnapshot>
   saveProvider(input: ProviderInput): Promise<AppSnapshot>
@@ -561,5 +601,12 @@ export interface GatewayApi {
   getDesktopRuntimeSettings(): Promise<DesktopRuntimeSettings>
   updateDesktopRuntimeSettings(settings: Pick<DesktopRuntimeSettings, 'launchAtLogin'>): Promise<DesktopRuntimeSettings>
   exportDiagnostics(): Promise<string>
+  getUpdateState(): Promise<AppUpdateState>
+  checkForUpdates(): Promise<AppUpdateState>
+  ignoreUpdate(version: string): Promise<AppUpdateState>
+  downloadUpdate(): Promise<AppUpdateState>
+  installUpdate(): Promise<void>
+  openUpdatePage(): Promise<void>
   onSnapshot(listener: (snapshot: AppSnapshot) => void): () => void
+  onUpdateState(listener: (state: AppUpdateState) => void): () => void
 }

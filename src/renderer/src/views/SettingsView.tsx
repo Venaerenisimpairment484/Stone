@@ -14,11 +14,17 @@ import {
   RotateCcw,
   FileDown,
   BellRing,
+  Download,
+  ExternalLink,
+  RefreshCw,
+  Rocket,
+  Sparkles,
 } from 'lucide-react'
 import type { AppSnapshot, BackupRecordSummary, GatewayApi, GatewaySettings } from '@shared/types'
 import type { ActionRunner } from '../App'
 import { Badge, FieldError, gatewayBaseUrl, PageHeader, Toggle } from '../ui'
 import { StoneMark } from '../StoneMark'
+import { UpdateProgress, statusLabel, statusTone, type AppUpdateController } from '../UpdateDialog'
 
 function SettingRow({ title, description, control }: { title: string; description: string; control: React.ReactNode }) {
   return <div className="setting-row"><div><strong>{title}</strong><span>{description}</span></div>{control}</div>
@@ -29,11 +35,13 @@ export function SettingsView({
   api,
   runAction,
   busyKeys,
+  update,
 }: {
   snapshot: AppSnapshot
   api: GatewayApi
   runAction: ActionRunner
   busyKeys: Set<string>
+  update: AppUpdateController
 }) {
   const [draft, setDraft] = useState<GatewaySettings>(snapshot.gateway)
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -47,6 +55,9 @@ export function SettingsView({
   const changed = useMemo(() => JSON.stringify(draft) !== JSON.stringify(snapshot.gateway), [draft, snapshot.gateway])
   const addressChanged = draft.host !== snapshot.gateway.host || draft.port !== snapshot.gateway.port
   const currentEndpoint = gatewayBaseUrl(snapshot.gatewayStatus.host, snapshot.gatewayStatus.port)
+  const appUpdate = update.state
+  const updateBusy = update.action !== null || appUpdate?.status === 'checking' || appUpdate?.status === 'installing'
+  const ignoredRelease = Boolean(appUpdate?.release && appUpdate.ignoredVersion === appUpdate.release.version)
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -141,7 +152,72 @@ export function SettingsView({
         </div>
       </section>
 
-      <section className="about-line"><StoneMark small /><div><strong>Stone Desktop</strong><span>{__APP_VERSION__} · Local-first AI Gateway</span></div><Badge tone="neutral">v0.7 模型策略</Badge></section>
+      <section className="settings-section">
+        <header><div className="settings-section__icon settings-section__icon--update"><Sparkles size={18} /></div><div><h2>应用更新</h2><p>从 GitHub Releases 检查并安装 Stone</p></div></header>
+        <div className="settings-section__content">
+          <div className="update-settings-status">
+            <div>
+              <span className="update-settings-status__icon">{appUpdate?.status === 'checking' || appUpdate?.status === 'downloading' || appUpdate?.status === 'installing' ? <LoaderCircle size={19} className="spin" /> : appUpdate?.status === 'downloaded' || appUpdate?.status === 'up-to-date' ? <CheckCircle2 size={19} /> : <Sparkles size={19} />}</span>
+              <div>
+                <strong>{appUpdate?.release ? `Stone ${appUpdate.release.version}` : `Stone ${appUpdate?.currentVersion ?? __APP_VERSION__}`}</strong>
+                <span>{updateSettingsDescription(appUpdate)}</span>
+              </div>
+            </div>
+            <div className="update-settings-status__badges">
+              <Badge tone={appUpdate ? statusTone(appUpdate) : 'neutral'}>{appUpdate ? statusLabel(appUpdate) : '正在读取'}</Badge>
+              {ignoredRelease && <Badge tone="neutral">已忽略</Badge>}
+            </div>
+          </div>
+
+          {appUpdate?.status === 'downloading' && appUpdate.progress && <UpdateProgress state={appUpdate} />}
+          {appUpdate && !appUpdate.automaticUpdateSupported && (
+            <div className="update-settings-reason"><AlertTriangle size={16} /><span>{appUpdate.automaticUpdateReason ?? '当前安装形式需要从 GitHub Releases 手动更新。'}</span></div>
+          )}
+          {(update.error || appUpdate?.error) && <div className="update-error" role="alert"><AlertTriangle size={16} /><span>{update.error ?? appUpdate?.error}</span></div>}
+
+          <div className="settings-actions update-settings-actions">
+            <button className="button button--secondary" type="button" disabled={updateBusy || appUpdate?.status === 'downloading'} onClick={() => void update.check()}>
+              {update.action === 'check' || appUpdate?.status === 'checking' ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}手动检查
+            </button>
+            {appUpdate?.release && <button className="button button--secondary" type="button" onClick={update.openDialog}>查看 Release notes</button>}
+            {appUpdate?.status === 'available' && !ignoredRelease && <button className="text-button" type="button" disabled={updateBusy} onClick={() => void update.ignore()}>忽略此版本</button>}
+            {appUpdate?.status === 'available' && appUpdate.automaticUpdateSupported && (
+              <button className="button button--primary" type="button" disabled={updateBusy} onClick={() => void update.download()}>
+                {update.action === 'download' ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}下载更新
+              </button>
+            )}
+            {appUpdate?.status === 'downloaded' && (
+              <button className="button button--primary" type="button" disabled={updateBusy} onClick={() => void update.install()}>
+                {update.action === 'install' ? <LoaderCircle size={16} className="spin" /> : <Rocket size={16} />}更新并重启
+              </button>
+            )}
+            {appUpdate && (!appUpdate.automaticUpdateSupported || appUpdate.status === 'unsupported') && (
+              <button className="button button--primary" type="button" disabled={update.action === 'open-page'} onClick={() => void update.openPage()}>
+                <ExternalLink size={16} />打开 Releases
+              </button>
+            )}
+          </div>
+          <div className="update-settings-meta">
+            <span>当前版本 v{appUpdate?.currentVersion ?? __APP_VERSION__}</span>
+            <span>{appUpdate?.checkedAt ? `上次检查 ${new Date(appUpdate.checkedAt).toLocaleString()}` : '尚未手动检查更新'}</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="about-line"><StoneMark small /><div><strong>Stone Desktop</strong><span>{__APP_VERSION__} · Local-first AI Gateway</span></div><Badge tone={appUpdate ? statusTone(appUpdate) : 'neutral'}>{appUpdate ? statusLabel(appUpdate) : 'GitHub Releases'}</Badge></section>
     </form>
   )
+}
+
+function updateSettingsDescription(update: AppUpdateController['state']): string {
+  if (!update) return '正在读取当前安装的更新能力。'
+  if (update.status === 'unsupported') return '当前安装形式不支持应用内自动更新。'
+  if (update.status === 'idle') return '手动检查 GitHub Releases 中的最新版本。'
+  if (update.status === 'checking') return '正在获取最新版本与发布说明。'
+  if (update.status === 'up-to-date') return '当前安装的 Stone 已是最新版本。'
+  if (update.status === 'available') return update.ignoredVersion === update.release?.version ? '此版本已忽略，仍可手动查看或下载。' : '新版本已发布，可查看说明后下载。'
+  if (update.status === 'downloading') return '安装包正在后台下载。'
+  if (update.status === 'downloaded') return '安装包已就绪，重启 Stone 即可完成更新。'
+  if (update.status === 'installing') return 'Stone 正在关闭并安装新版本。'
+  return '更新操作失败，当前版本仍可继续使用。'
 }

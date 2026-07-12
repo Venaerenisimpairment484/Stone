@@ -45,12 +45,25 @@ const stone: GatewayApi = {
   getDesktopRuntimeSettings: () => ipcRenderer.invoke('stone:get-desktop-runtime-settings'),
   updateDesktopRuntimeSettings: (settings) => ipcRenderer.invoke('stone:update-desktop-runtime-settings', settings),
   exportDiagnostics: () => ipcRenderer.invoke('stone:export-diagnostics'),
+  getUpdateState: () => ipcRenderer.invoke('stone:get-update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('stone:check-for-updates'),
+  ignoreUpdate: (version) => ipcRenderer.invoke('stone:ignore-update', version),
+  downloadUpdate: () => ipcRenderer.invoke('stone:download-update'),
+  installUpdate: () => ipcRenderer.invoke('stone:install-update'),
+  openUpdatePage: () => ipcRenderer.invoke('stone:open-update-page'),
   onSnapshot: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: Awaited<ReturnType<GatewayApi['getSnapshot']>>) => {
       listener(snapshot)
     }
     ipcRenderer.on('stone:snapshot', handler)
     return () => ipcRenderer.removeListener('stone:snapshot', handler)
+  },
+  onUpdateState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: Awaited<ReturnType<GatewayApi['getUpdateState']>>) => {
+      listener(state)
+    }
+    ipcRenderer.on('stone:update-state', handler)
+    return () => ipcRenderer.removeListener('stone:update-state', handler)
   }
 }
 

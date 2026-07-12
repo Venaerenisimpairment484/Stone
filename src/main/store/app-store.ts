@@ -1,6 +1,7 @@
 import { safeStorage } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join, normalize } from 'node:path'
+import { valid as validSemver } from 'semver'
 import { clientNativeProtocols } from '@shared/types'
 import type {
   Account,
@@ -56,6 +57,7 @@ const DEFAULT_STATUS: GatewayStatus = {
 
 const MAX_PERSISTED_REQUEST_LOGS = 20_000
 const MAX_RENDERER_REQUEST_LOGS = 500
+const IGNORED_UPDATE_VERSION_KEY = 'ignored_update_version'
 
 export class AppStore {
   private readonly store: SqliteStateStore<PersistedState>
@@ -91,6 +93,22 @@ export class AppStore {
 
   public getStateRepository(): SqliteStateStore<PersistedState> {
     return this.store
+  }
+
+  public getIgnoredUpdateVersion(): string | undefined {
+    const value = this.store.readAppMetadata(IGNORED_UPDATE_VERSION_KEY)
+    return value === undefined ? undefined : validSemver(value) ?? undefined
+  }
+
+  public async setIgnoredUpdateVersion(version?: string): Promise<void> {
+    if (version === undefined || version.length === 0) {
+      await this.store.removeAppMetadata(IGNORED_UPDATE_VERSION_KEY)
+      return
+    }
+
+    const normalized = validSemver(version)
+    if (!normalized) throw new Error('Ignored update version must be a valid semantic version.')
+    await this.store.writeAppMetadata(IGNORED_UPDATE_VERSION_KEY, normalized)
   }
 
   public getSnapshot(): AppSnapshot {

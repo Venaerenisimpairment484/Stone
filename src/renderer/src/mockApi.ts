@@ -1,6 +1,7 @@
 import type {
   AccountInput,
   AppSnapshot,
+  AppUpdateState,
   ClientConfigBackup,
   ClientConfigEditorState,
   ClientConfigFileRole,
@@ -535,7 +536,14 @@ function loadSnapshot(): AppSnapshot {
 export function createMockApi(): GatewayApi {
   const snapshot = loadSnapshot()
   const listeners = new Set<(value: AppSnapshot) => void>()
+  const updateListeners = new Set<(value: AppUpdateState) => void>()
   const clientBackups: ClientConfigBackup[] = []
+  let updateState: AppUpdateState = {
+    revision: 0,
+    currentVersion: __APP_VERSION__,
+    status: 'idle',
+    automaticUpdateSupported: true,
+  }
 
   const poolModelCandidates = (accountIds: string[]) => buildPoolModelCoverage(
     accountIds.map((accountId) => snapshot.accounts.find((account) => account.id === accountId)).filter((account) => account !== undefined),
@@ -562,6 +570,17 @@ export function createMockApi(): GatewayApi {
   const changed = async () => {
     await pause()
     return publish()
+  }
+
+  const publishUpdate = (patch: Partial<AppUpdateState>): AppUpdateState => {
+    updateState = {
+      ...updateState,
+      ...patch,
+      revision: updateState.revision + 1,
+    }
+    const value = clone(updateState)
+    updateListeners.forEach((listener) => listener(value))
+    return value
   }
 
   return {
@@ -1004,9 +1023,71 @@ export function createMockApi(): GatewayApi {
     async getDesktopRuntimeSettings() { return { launchAtLogin: false, supported: false } },
     async updateDesktopRuntimeSettings() { return { launchAtLogin: false, supported: false } },
     async exportDiagnostics() { return JSON.stringify({ version: __APP_VERSION__, platform: 'browser-preview' }, null, 2) },
+    async getUpdateState() { return clone(updateState) },
+    async checkForUpdates() {
+      publishUpdate({ status: 'checking', error: undefined, checkedAt: Date.now() })
+      await pause(360)
+      return publishUpdate({
+        status: 'available',
+        checkedAt: Date.now(),
+        error: undefined,
+        progress: undefined,
+        release: {
+          version: '0.8.1',
+          tagName: 'v0.8.1',
+          title: 'Stone 0.8.1 · 更稳健的本地更新体验',
+          publishedAt: new Date().toISOString(),
+          url: 'https://github.com/EasyCode-Obsidian/Stone/releases/tag/v0.8.1',
+          notes: [
+            '本次更新',
+            '',
+            '- 新增 GitHub Releases 在线更新与新版本提醒。',
+            '- 支持忽略版本、查看下载进度和更新后重启。',
+            '- 优化账号、号池与客户端配置体验。',
+            '',
+            '更新方式',
+            '',
+            '- Windows 安装版与 Linux AppImage 支持应用内更新。',
+            '- Portable、deb 与当前 macOS 版本可前往 Releases 手动更新。',
+          ].join('\n'),
+        },
+      })
+    },
+    async ignoreUpdate(version) {
+      await pause()
+      return publishUpdate({ ignoredVersion: version })
+    },
+    async downloadUpdate() {
+      publishUpdate({
+        status: 'downloading',
+        error: undefined,
+        progress: { percent: 0, transferred: 0, total: 92 * 1024 * 1024, bytesPerSecond: 0 },
+      })
+      for (const percent of [18, 47, 76, 100]) {
+        await pause(180)
+        publishUpdate({
+          status: 'downloading',
+          progress: {
+            percent,
+            transferred: Math.round(92 * 1024 * 1024 * percent / 100),
+            total: 92 * 1024 * 1024,
+            bytesPerSecond: 8.4 * 1024 * 1024,
+          },
+        })
+      }
+      return publishUpdate({ status: 'downloaded', progress: undefined })
+    },
+    async installUpdate() {
+      publishUpdate({ status: 'installing', error: undefined })
+    },
+    async openUpdatePage() { await pause(80) },
     onSnapshot(listener) {
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+    onUpdateState(listener) {
+      updateListeners.add(listener)
+      return () => updateListeners.delete(listener)
     },
   }
 }

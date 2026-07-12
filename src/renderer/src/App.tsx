@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Boxes,
@@ -15,7 +15,7 @@ import {
   Square,
   X,
 } from 'lucide-react'
-import type { AppSnapshot } from '@shared/types'
+import type { AppSnapshot, AppUpdateState } from '@shared/types'
 import { getGatewayApi } from './api'
 import { OverviewView } from './views/OverviewView'
 import { ProvidersView } from './views/ProvidersView'
@@ -26,6 +26,12 @@ import { SettingsView } from './views/SettingsView'
 import { ClientsView } from './views/ClientsView'
 import { gatewayBaseUrl } from './ui'
 import { StoneMark } from './StoneMark'
+import {
+  UpdateBanner,
+  UpdateDialog,
+  type AppUpdateController,
+  type UpdateAction,
+} from './UpdateDialog'
 
 export type PageId = 'overview' | 'providers' | 'pools' | 'routes' | 'clients' | 'requests' | 'settings'
 export type ActionRunner = (key: string, operation: () => Promise<AppSnapshot>) => Promise<boolean>
@@ -63,6 +69,17 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [busyKeys, setBusyKeys] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
+  const [updateState, setUpdateState] = useState<AppUpdateState | null>(null)
+  const [updateAction, setUpdateAction] = useState<UpdateAction | null>(null)
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+  const updateRevision = useRef(-1)
+
+  const acceptUpdateState = useCallback((next: AppUpdateState) => {
+    if (next.revision <= updateRevision.current) return
+    updateRevision.current = next.revision
+    setUpdateState(next)
+  }, [])
 
   const load = useCallback(async () => {
     setError(null)
@@ -77,6 +94,24 @@ export default function App() {
     void load()
     return api.onSnapshot(setSnapshot)
   }, [api, load])
+
+  useEffect(() => {
+    const unsubscribe = api.onUpdateState(acceptUpdateState)
+    void api.getUpdateState()
+      .then(acceptUpdateState)
+      .catch((cause: unknown) => setUpdateError(cause instanceof Error ? cause.message : '无法读取应用更新状态'))
+    return unsubscribe
+  }, [acceptUpdateState, api])
+
+  useEffect(() => {
+    if (
+      updateState?.status === 'available'
+      && updateState.release
+      && updateState.ignoredVersion !== updateState.release.version
+    ) {
+      setUpdateDialogOpen(true)
+    }
+  }, [updateState])
 
   useEffect(() => {
     const handleHashChange = () => setPage(pageFromHash())
@@ -107,6 +142,81 @@ export default function App() {
     window.history.replaceState(null, '', `#${id}`)
     setMobileNavOpen(false)
   }
+
+  const runUpdateStateOperation = useCallback(async (
+    action: UpdateAction,
+    operation: () => Promise<AppUpdateState>,
+  ): Promise<AppUpdateState | undefined> => {
+    setUpdateAction(action)
+    setUpdateError(null)
+    try {
+      const next = await operation()
+      acceptUpdateState(next)
+      return next
+    } catch (cause) {
+      setUpdateError(cause instanceof Error ? cause.message : '应用更新操作失败')
+      return undefined
+    } finally {
+      setUpdateAction(null)
+    }
+  }, [acceptUpdateState])
+
+  const checkForUpdates = useCallback(async () => {
+    const next = await runUpdateStateOperation('check', () => api.checkForUpdates())
+    if (next && (next.status === 'available' || next.status === 'downloaded' || next.status === 'unsupported')) {
+      setUpdateDialogOpen(true)
+    }
+  }, [api, runUpdateStateOperation])
+
+  const ignoreUpdate = useCallback(async () => {
+    const version = updateState?.release?.version
+    if (!version) return
+    const next = await runUpdateStateOperation('ignore', () => api.ignoreUpdate(version))
+    if (next) setUpdateDialogOpen(false)
+  }, [api, runUpdateStateOperation, updateState?.release?.version])
+
+  const downloadUpdate = useCallback(async () => {
+    await runUpdateStateOperation('download', () => api.downloadUpdate())
+  }, [api, runUpdateStateOperation])
+
+  const installUpdate = useCallback(async () => {
+    if (snapshot && snapshot.gatewayStatus.activeRequests > 0) {
+      const confirmed = window.confirm(`当前仍有 ${snapshot.gatewayStatus.activeRequests} 个活跃请求。更新会关闭 Stone 并中断这些请求，是否继续？`)
+      if (!confirmed) return
+    }
+    setUpdateAction('install')
+    setUpdateError(null)
+    try {
+      await api.installUpdate()
+    } catch (cause) {
+      setUpdateError(cause instanceof Error ? cause.message : '无法安装应用更新')
+      setUpdateAction(null)
+    }
+  }, [api, snapshot])
+
+  const openUpdatePage = useCallback(async () => {
+    setUpdateAction('open-page')
+    setUpdateError(null)
+    try {
+      await api.openUpdatePage()
+    } catch (cause) {
+      setUpdateError(cause instanceof Error ? cause.message : '无法打开 GitHub Releases')
+    } finally {
+      setUpdateAction(null)
+    }
+  }, [api])
+
+  const updateController = useMemo<AppUpdateController>(() => ({
+    state: updateState,
+    action: updateAction,
+    error: updateError,
+    openDialog: () => setUpdateDialogOpen(true),
+    check: checkForUpdates,
+    ignore: ignoreUpdate,
+    download: downloadUpdate,
+    install: installUpdate,
+    openPage: openUpdatePage,
+  }), [checkForUpdates, downloadUpdate, ignoreUpdate, installUpdate, openUpdatePage, updateAction, updateError, updateState])
 
   if (!snapshot) {
     return (
@@ -220,6 +330,19 @@ export default function App() {
           </div>
         )}
 
+        {updateState && (
+          <UpdateBanner
+            state={updateState}
+            action={updateAction}
+            onOpen={() => setUpdateDialogOpen(true)}
+            onCheck={checkForUpdates}
+            onIgnore={ignoreUpdate}
+            onDownload={downloadUpdate}
+            onInstall={installUpdate}
+            onOpenPage={openUpdatePage}
+          />
+        )}
+
         <main className="page-content">
           {page === 'overview' && <OverviewView snapshot={snapshot} navigate={setActivePage} />}
           {page === 'providers' && <ProvidersView snapshot={snapshot} api={api} runAction={runAction} busyKeys={busyKeys} />}
@@ -227,9 +350,21 @@ export default function App() {
           {page === 'routes' && <RoutesView snapshot={snapshot} api={api} runAction={runAction} busyKeys={busyKeys} />}
           {page === 'clients' && <ClientsView snapshot={snapshot} api={api} />}
           {page === 'requests' && <RequestsView snapshot={snapshot} api={api} runAction={runAction} busyKeys={busyKeys} />}
-          {page === 'settings' && <SettingsView snapshot={snapshot} api={api} runAction={runAction} busyKeys={busyKeys} />}
+          {page === 'settings' && <SettingsView snapshot={snapshot} api={api} runAction={runAction} busyKeys={busyKeys} update={updateController} />}
         </main>
       </div>
+      <UpdateDialog
+        open={updateDialogOpen}
+        state={updateState}
+        action={updateAction}
+        actionError={updateError}
+        onClose={() => setUpdateDialogOpen(false)}
+        onCheck={checkForUpdates}
+        onIgnore={ignoreUpdate}
+        onDownload={downloadUpdate}
+        onInstall={installUpdate}
+        onOpenPage={openUpdatePage}
+      />
     </div>
   )
 }

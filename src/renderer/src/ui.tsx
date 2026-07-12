@@ -1,4 +1,4 @@
-import { useEffect, type PropsWithChildren, type ReactNode } from 'react'
+import { useEffect, useId, type PropsWithChildren, type ReactNode } from 'react'
 import { AlertCircle, Check, LoaderCircle, X } from 'lucide-react'
 import type { AccountCircuitState, AccountStatus, Protocol, RequestLog } from '@shared/types'
 
@@ -72,6 +72,7 @@ export function Modal({
   footer,
   onClose,
   width = 'medium',
+  closable = true,
 }: {
   open: boolean
   title: string
@@ -80,28 +81,33 @@ export function Modal({
   footer?: ReactNode
   onClose: () => void
   width?: 'small' | 'medium' | 'large' | 'xlarge'
+  closable?: boolean
 }) {
+  const titleId = useId()
+
   useEffect(() => {
-    if (!open) return
+    if (!open || !closable) return
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [onClose, open])
+  }, [closable, onClose, open])
 
   if (!open) return null
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={`modal modal--${width}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => closable && event.target === event.currentTarget && onClose()}>
+      <section className={`modal modal--${width}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="modal__header">
           <div>
-            <h2 id="dialog-title">{title}</h2>
+            <h2 id={titleId}>{title}</h2>
             {description && <p>{description}</p>}
           </div>
-          <button type="button" className="icon-button" onClick={onClose} title="关闭">
-            <X size={18} />
-          </button>
+          {closable && (
+            <button type="button" className="icon-button" onClick={onClose} title="关闭">
+              <X size={18} />
+            </button>
+          )}
         </header>
         <div className="modal__body">{children}</div>
         {footer && <footer className="modal__footer">{footer}</footer>}

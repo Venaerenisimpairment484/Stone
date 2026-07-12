@@ -85,6 +85,50 @@ describe('AppStore', () => {
     expect(restarted.getCredential(restarted.getRuntimeAccount(restartedAccount.id)!.credentialId)).toBe('sk-secret-value')
   })
 
+  it('persists and clears an ignored update version outside snapshots and full persisted state', async () => {
+    const store = createStore()
+    await store.initialize()
+    await store.setIgnoredUpdateVersion('v1.2.3')
+
+    expect(store.getIgnoredUpdateVersion()).toBe('1.2.3')
+    expect(store.getSnapshot()).not.toHaveProperty('ignoredUpdateVersion')
+    expect(store.getStateRepository().read()).not.toHaveProperty('ignoredUpdateVersion')
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('1.2.3')
+    expect(JSON.stringify(store.getStateRepository().read())).not.toContain('1.2.3')
+
+    await store.close()
+    const databasePath = join(directory, SQLITE_DATABASE_FILENAME)
+    const persisted = new DatabaseSync(databasePath, { readOnly: true })
+    expect(persisted.prepare('SELECT value FROM app_metadata WHERE key = ?').get('ignored_update_version'))
+      .toEqual({ value: '1.2.3' })
+    persisted.close()
+
+    const restarted = createStore()
+    await restarted.initialize()
+    expect(restarted.getIgnoredUpdateVersion()).toBe('1.2.3')
+    await restarted.setIgnoredUpdateVersion('')
+    expect(restarted.getIgnoredUpdateVersion()).toBeUndefined()
+    await restarted.close()
+
+    const cleared = new DatabaseSync(databasePath, { readOnly: true })
+    expect(cleared.prepare('SELECT value FROM app_metadata WHERE key = ?').get('ignored_update_version'))
+      .toBeUndefined()
+    cleared.close()
+
+    const afterClear = createStore()
+    await afterClear.initialize()
+    expect(afterClear.getIgnoredUpdateVersion()).toBeUndefined()
+  })
+
+  it('rejects an invalid ignored update version without changing the stored value', async () => {
+    const store = createStore()
+    await store.initialize()
+    await store.setIgnoredUpdateVersion('2.0.0')
+
+    await expect(store.setIgnoredUpdateVersion('not-a-semver')).rejects.toThrow(/valid semantic version/)
+    expect(store.getIgnoredUpdateVersion()).toBe('2.0.0')
+  })
+
   it('persists reusable proxies with encrypted passwords and supports update, clear, and delete', async () => {
     const password = 'proxy-password-private'
     const store = createStore()

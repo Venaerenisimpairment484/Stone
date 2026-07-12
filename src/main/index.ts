@@ -1,13 +1,18 @@
-import { app, BrowserWindow, Menu, nativeImage, Tray } from 'electron'
+import { app, BrowserWindow, Menu, nativeImage, net, shell, Tray } from 'electron'
+import electronUpdater from 'electron-updater'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { GatewayServer, type GatewayConfig } from './gateway'
 import { ClientConfigService } from './client-config'
 import { registerGatewayApi } from './ipc/gateway-api'
+import { registerUpdateApi } from './ipc/update-api'
 import { AppStore } from './store/app-store'
 import { DatabaseBackupService } from './backup'
 import { resolveChatGptCredential } from './providers'
 import { OutboundTransportManager, resolveEffectiveProxy } from './proxy'
+import { UpdateService } from './update'
+
+const { autoUpdater } = electronUpdater
 
 let mainWindow: BrowserWindow | undefined
 let tray: Tray | undefined
@@ -15,9 +20,11 @@ let store: AppStore
 let gateway: GatewayServer
 let backups: DatabaseBackupService<import('./store/types').PersistedState>
 let outboundTransport: OutboundTransportManager
+let updateService: UpdateService
 let isQuitting = false
 let storeClosed = false
-let shutdownStarted = false
+let shutdownForUpdate = false
+let shutdownPromise: Promise<void> | undefined
 
 if (process.env.STONE_USER_DATA_DIR) {
   app.setPath('userData', resolve(process.env.STONE_USER_DATA_DIR))
@@ -63,9 +70,27 @@ async function bootstrap(): Promise<void> {
     platform: process.platform
   })
 
+  updateService = new UpdateService({
+    currentVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    updater: autoUpdater,
+    preferences: store,
+    fetchImplementation: (url, init) => net.fetch(url, init),
+    openExternal: (url) => shell.openExternal(url),
+    prepareToInstall: async () => {
+      isQuitting = true
+      shutdownForUpdate = true
+      await shutdownServices()
+    }
+  })
+  await updateService.initialize()
+
   registerGatewayApi(store, gateway, clientConfig, outboundTransport, backups, updateTrayMenu)
+  registerUpdateApi(updateService)
   createWindow()
   createTray()
+  updateService.startAutomaticChecks()
 
   if (store.getSnapshot().gateway.autoStart) {
     try {
@@ -232,22 +257,9 @@ function toGatewayConfig(store: AppStore): GatewayConfig {
 
 app.on('before-quit', (event) => {
   isQuitting = true
-  if (storeClosed || shutdownStarted) return
+  if (storeClosed) return
   event.preventDefault()
-  shutdownStarted = true
-  void (async () => {
-    try {
-      if (gateway) await gateway.stop()
-      if (backups) await backups.close()
-      if (outboundTransport) await outboundTransport.close()
-      if (store) await store.close()
-    } catch (error: unknown) {
-      console.error('Stone could not finish graceful shutdown', error)
-    } finally {
-      storeClosed = true
-      app.quit()
-    }
-  })()
+  void shutdownServices().finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {
@@ -258,3 +270,22 @@ void bootstrap().catch((error: unknown) => {
   console.error('Stone failed to start', error)
   app.quit()
 })
+
+function shutdownServices(): Promise<void> {
+  if (storeClosed) return Promise.resolve()
+  if (shutdownPromise) return shutdownPromise
+  shutdownPromise = (async () => {
+    try {
+      if (!shutdownForUpdate && updateService) updateService.close()
+      if (gateway) await gateway.stop()
+      if (backups) await backups.close()
+      if (outboundTransport) await outboundTransport.close()
+      if (store) await store.close()
+    } catch (error: unknown) {
+      console.error('Stone could not finish graceful shutdown', error)
+    } finally {
+      storeClosed = true
+    }
+  })()
+  return shutdownPromise
+}

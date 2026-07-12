@@ -216,6 +216,20 @@ export class SqliteStateStore<T extends SqlitePersistedShape> {
     return structuredClone(this.data)
   }
 
+  public readAppMetadata(key: string): string | undefined {
+    return readMetadata(this.requireDatabase(), key)
+  }
+
+  public async writeAppMetadata(key: string, value: string): Promise<void> {
+    await this.mutateAppMetadata((database) => writeMetadata(database, key, value))
+  }
+
+  public async removeAppMetadata(key: string): Promise<void> {
+    await this.mutateAppMetadata((database) => {
+      database.prepare('DELETE FROM app_metadata WHERE key = ?').run(key)
+    })
+  }
+
   public async update(mutator: (draft: T) => void | Promise<void>): Promise<T> {
     const operation = async (): Promise<T> => {
       this.requireDatabase()
@@ -428,6 +442,24 @@ export class SqliteStateStore<T extends SqlitePersistedShape> {
   private normalize(value: T): T {
     const normalized = this.options.normalize?.(structuredClone(value)) ?? structuredClone(value)
     return structuredClone(normalized)
+  }
+
+  private async mutateAppMetadata(mutator: (database: DatabaseSync) => void): Promise<void> {
+    const operation = async (): Promise<void> => {
+      const database = this.requireDatabase()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        mutator(database)
+        database.exec('COMMIT')
+      } catch (error) {
+        rollback(database)
+        throw error
+      }
+    }
+
+    const pending = this.writeChain.then(operation, operation)
+    this.writeChain = pending.then(() => undefined, () => undefined)
+    await pending
   }
 
   private requireDatabase(): DatabaseSync {

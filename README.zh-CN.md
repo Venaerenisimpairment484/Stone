@@ -57,6 +57,17 @@ Claude Code / Codex / Gemini CLI
 | 编程客户端 | 检测和管理 Claude Code、Codex、Gemini CLI 配置 Profile，预览修改并恢复备份 |
 | 协议网关 | 接收 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini generateContent，并转换普通或流式请求，包括工具调用与用量信息 |
 | 本地记录 | 查看请求状态、延迟、Token 用量、账号健康事件和桌面通知，不保存请求或响应正文 |
+| 应用更新 | 启动后自动比对 GitHub Releases，也可在设置中手动检查；查看更新说明、忽略当前版本、下载进度并更新后重启 |
+
+## 界面预览
+
+![Stone 总览面板](docs/screenshots/overview.png)
+
+| 账号、额度与健康状态 | 号池调度与模型策略 |
+| --- | --- |
+| ![Stone 账号管理](docs/screenshots/accounts.png) | ![Stone 号池管理](docs/screenshots/pools.png) |
+| 编程客户端配置 | 在线更新与版本说明 |
+| ![Stone 编程客户端配置](docs/screenshots/clients.png) | ![Stone 在线更新弹窗](docs/screenshots/online-update.png) |
 
 ## 快速开始
 
@@ -73,6 +84,8 @@ Claude Code / Codex / Gemini CLI
 | Linux arm64 | `Stone-*-linux-arm64.AppImage` 或 `Stone-*-linux-arm64.deb` |
 
 当前 Windows 版本尚未签名，macOS 版本尚未经过 Apple 公证，系统可能显示“未知发布者”或首次启动警告。批准运行前，请先使用 `SHA256SUMS` 核对文件。
+
+从 `v0.7.1` 升级到 `v0.8.0` 需要手动下载安装一次，因为旧版本尚未包含在线更新组件。安装 `v0.8.0` 后，Windows 安装版与 Linux AppImage 可以在应用内下载后更新并重启；Windows Portable、Linux deb 与当前 macOS 版本会打开 Releases，由用户手动替换。
 
 Linux 可以直接运行 AppImage，或安装 deb：
 
@@ -111,7 +124,9 @@ sudo apt install ./Stone-*.deb
 - Codex 额度图仅适用于 ChatGPT OAuth 账号，并从 Stone 首次获取到额度信息后开始积累数据。
 - 代理连通性检测会请求 `api.ipify.org`，失败时回退到 `icanhazip.com`，用于识别代理的公网出口 IP。
 - Linux 安全凭据存储需要 `libsecret`、KWallet 等兼容 Secret Service 的 Keyring；AppImage 还可能需要 FUSE 2。
-- 当前尚未提供应用内自动更新、正式代码签名和 macOS 公证。
+- Stone 启动后会自动检查 GitHub Releases，也可以在“设置 → 应用更新”中手动检查、查看更新说明或忽略某个版本。
+- Windows 安装版与 Linux AppImage 支持应用内下载并在重启后完成更新；Windows Portable、Linux deb 与当前 macOS 版本需要从 Releases 手动更新。
+- 当前尚未提供正式代码签名和 macOS 公证。
 
 ## 交流社区
 

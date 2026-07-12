@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, ipcMain, Notification } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { clientNativeProtocols } from '@shared/types'
@@ -24,6 +24,7 @@ import type { ClientConfigService } from '../client-config'
 import type { DatabaseBackupService } from '../backup'
 import type { PersistedState } from '../store/types'
 import { serializeDiagnostics } from './diagnostics'
+import { assertTrustedSender } from './trusted-sender'
 import { OutboundTransportManager, probeProxy, resolveEffectiveProxy } from '../proxy'
 
 export interface GatewayController {
@@ -491,21 +492,6 @@ function assertRouteClient(value: unknown): asserts value is RouteClient {
   if (value !== 'claude' && value !== 'codex' && value !== 'gemini') {
     throw new Error('Unsupported client configuration target.')
   }
-}
-
-function assertTrustedSender(event: IpcMainInvokeEvent): void {
-  const frame = event.senderFrame
-  const owner = BrowserWindow.fromWebContents(event.sender)
-  if (!frame || !owner || frame !== event.sender.mainFrame) {
-    throw new Error('Stone rejected IPC from an untrusted frame.')
-  }
-
-  const url = new URL(frame.url)
-  const developmentUrl = process.env.ELECTRON_RENDERER_URL
-  const trusted = developmentUrl
-    ? url.origin === new URL(developmentUrl).origin
-    : url.protocol === 'file:' && decodeURIComponent(url.pathname).replaceAll('\\', '/').endsWith('/out/renderer/index.html')
-  if (!trusted) throw new Error('Stone rejected IPC from an untrusted origin.')
 }
 
 function toGatewayConfig(store: AppStore): GatewayConfig {

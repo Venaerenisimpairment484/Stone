@@ -57,6 +57,17 @@ The client connects only to Stone's local address. Stone chooses a suitable acco
 | Coding clients | Detect and manage Claude Code, Codex, and Gemini CLI profiles; preview changes and restore backups |
 | Protocol gateway | Accept OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini generateContent; convert normal and streaming requests, including tool calls and usage |
 | Local visibility | Review request status, latency, token usage, account health events, and desktop notifications without storing request or response bodies |
+| Application updates | Compare the installed version with GitHub Releases at startup or on demand; review release notes, ignore a version, follow download progress, and restart into the update |
+
+## Screenshots
+
+![Stone overview dashboard](docs/screenshots/overview.png)
+
+| Accounts, quota, and health | Pool scheduling and model policies |
+| --- | --- |
+| ![Stone account management](docs/screenshots/accounts.png) | ![Stone account pools](docs/screenshots/pools.png) |
+| Coding client configuration | Online updates and release notes |
+| ![Stone coding client configuration](docs/screenshots/clients.png) | ![Stone online update dialog](docs/screenshots/online-update.png) |
 
 ## Quick Start
 
@@ -73,6 +84,8 @@ Download the package for your platform and `SHA256SUMS` from [GitHub Releases](.
 | Linux arm64 | `Stone-*-linux-arm64.AppImage` or `Stone-*-linux-arm64.deb` |
 
 Windows builds are currently unsigned, and macOS builds are not Apple-notarized. Your operating system may show an unknown-publisher or first-launch warning. Verify the file against `SHA256SUMS` before approving it.
+
+The first upgrade from `v0.7.1` to `v0.8.0` must be installed manually because the older release does not contain the updater. After `v0.8.0` is installed, Windows setup builds and Linux AppImages can download an update in Stone and restart into it. Windows Portable, Linux deb, and current macOS builds open Releases for manual replacement.
 
 On Linux, run an AppImage or install a deb package:
 
@@ -111,7 +124,9 @@ The default gateway address is `http://127.0.0.1:15721`. Manual connection value
 - Codex quota charts are available only for ChatGPT OAuth accounts and begin collecting data after Stone first receives quota information.
 - Proxy connectivity tests contact `api.ipify.org` and fall back to `icanhazip.com` to identify the proxy's public egress IP.
 - Linux credential storage requires a Secret Service-compatible keyring such as `libsecret` or KWallet. AppImage may also require FUSE 2.
-- Automatic application updates, production code signing, and macOS notarization are not available yet.
+- Stone checks GitHub Releases at startup. You can also check manually, read release notes, or ignore a version under **Settings → Application Updates**.
+- Windows setup builds and Linux AppImages support in-app download and restart installation. Windows Portable, Linux deb, and current macOS builds require a manual update from Releases.
+- Production code signing and macOS notarization are not available yet.
 
 ## Community
 
