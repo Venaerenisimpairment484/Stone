@@ -1,21 +1,48 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="title description">
-  <title id="title">Stone star history</title>
-  <desc id="description">The star history chart is being synchronized.</desc>
+  <title id="title">EasyCode-Obsidian/Stone star history</title>
+  <desc id="description">2 stars - history stored in this repository</desc>
   <style>
     .title { fill: #f0f6fc; font: 700 24px Inter, "Segoe UI", Arial, sans-serif; }
-    .subtitle { fill: #8b949e; font: 12px Inter, "Segoe UI", Arial, sans-serif; }
-    .message { fill: #8b949e; font: 600 16px Inter, "Segoe UI", Arial, sans-serif; }
+    .subtitle, .axis { fill: #8b949e; font: 12px Inter, "Segoe UI", Arial, sans-serif; }
+    .count { fill: #f0f6fc; font: 700 30px Inter, "Segoe UI", Arial, sans-serif; }
+    .label { fill: #8b949e; font: 600 11px Inter, "Segoe UI", Arial, sans-serif; text-transform: uppercase; }
     .grid { stroke: #30363d; stroke-width: 1; }
+    .line { fill: none; stroke: #3fbf8b; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
+    .area { fill: #238a65; fill-opacity: .2; }
+    .point { fill: #3fbf8b; stroke: #0d1117; stroke-width: 3; }
+    .empty { fill: #8b949e; font: 600 15px Inter, "Segoe UI", Arial, sans-serif; }
   </style>
   <rect width="960" height="480" rx="10" fill="#0d1117"/>
   <rect x=".5" y=".5" width="959" height="479" rx="9.5" fill="none" stroke="#30363d"/>
   <text class="title" x="34" y="45">Stone Star History</text>
-  <text class="subtitle" x="34" y="68">History stored in this repository</text>
-  <line class="grid" x1="74" y1="104" x2="926" y2="104"/>
-  <line class="grid" x1="74" y1="184" x2="926" y2="184"/>
-  <line class="grid" x1="74" y1="264" x2="926" y2="264"/>
-  <line class="grid" x1="74" y1="344" x2="926" y2="344"/>
+  <text class="subtitle" x="34" y="68">2 stars - history stored in this repository</text>
+  <text class="label" x="926" y="33" text-anchor="end">Current</text>
+  <text class="count" x="926" y="67" text-anchor="end">2</text>
   <line class="grid" x1="74" y1="422" x2="926" y2="422"/>
-  <text class="message" x="480" y="272" text-anchor="middle">Synchronizing star history...</text>
+  <line class="grid" x1="74" y1="358.4" x2="926" y2="358.4"/>
+  <line class="grid" x1="74" y1="294.8" x2="926" y2="294.8"/>
+  <line class="grid" x1="74" y1="231.2" x2="926" y2="231.2"/>
+  <line class="grid" x1="74" y1="167.6" x2="926" y2="167.6"/>
+  <line class="grid" x1="74" y1="104" x2="926" y2="104"/>
+  <line class="grid" x1="74" y1="104" x2="74" y2="422"/>
+  <line class="grid" x1="287" y1="104" x2="287" y2="422"/>
+  <line class="grid" x1="500" y1="104" x2="500" y2="422"/>
+  <line class="grid" x1="713" y1="104" x2="713" y2="422"/>
+  <line class="grid" x1="926" y1="104" x2="926" y2="422"/>
+  <text class="axis" x="62" y="426" text-anchor="end">0</text>
+  <text class="axis" x="62" y="362.4" text-anchor="end">1</text>
+  <text class="axis" x="62" y="298.8" text-anchor="end">2</text>
+  <text class="axis" x="62" y="235.2" text-anchor="end">3</text>
+  <text class="axis" x="62" y="171.6" text-anchor="end">4</text>
+  <text class="axis" x="62" y="108" text-anchor="end">5</text>
+  <text class="axis" x="74" y="452" text-anchor="middle">11:19</text>
+  <text class="axis" x="287" y="452" text-anchor="middle">17:19</text>
+  <text class="axis" x="500" y="452" text-anchor="middle">23:19</text>
+  <text class="axis" x="713" y="452" text-anchor="middle">05:19</text>
+  <text class="axis" x="926" y="452" text-anchor="middle">11:19</text>
+  <path class="area" d="M 74 422 H 188.42 V 358.4 H 188.6 V 294.8 H 926 V 422 H 74 Z"/>
+  <path class="line" d="M 74 422 H 188.42 V 358.4 H 188.6 V 294.8"/>
+  <circle class="point" cx="188.6" cy="294.8" r="5"/>
+  
 </svg>
