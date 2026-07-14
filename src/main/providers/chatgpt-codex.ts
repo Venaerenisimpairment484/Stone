@@ -5,18 +5,29 @@ import { extractCodexQuotaFromUsagePayload } from './quota'
 import { deserializeChatGptCredential, serializeChatGptCredential, type ChatGptCredentialBundle } from '../auth'
 
 export const CHATGPT_CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
-export const CODEX_CLIENT_VERSION = '0.144.1'
+export const CHATGPT_CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'
+export const CODEX_CLIENT_VERSION = '0.144.3'
 export const CHATGPT_CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`
 export const CHATGPT_CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
-const CODEX_USER_AGENT = `codex_cli_rs/${CODEX_CLIENT_VERSION} (Windows 11; x86_64)`
 const CODEX_PASSTHROUGH_HEADERS = Object.freeze([
   'accept-language',
   'conversation_id',
   'session_id',
+  'session-id',
+  'thread-id',
+  'x-client-request-id',
+  'x-codex-beta-features',
+  'x-codex-installation-id',
+  'x-codex-parent-thread-id',
   'x-codex-turn-state',
-  'x-codex-turn-metadata'
+  'x-codex-turn-metadata',
+  'x-codex-window-id',
+  'x-openai-internal-codex-responses-lite',
+  'x-openai-subagent'
 ])
+const CODEX_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
+const CODEX_USER_AGENT_VERSION = /\bcodex(?:[_-][a-z0-9]+)*\/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)/i
 
 type ChatGptSourceHeaders = Headers | Readonly<Record<string, string | string[] | undefined>>
 
@@ -84,18 +95,37 @@ export function applyChatGptCodexHeaders(
     const value = readSourceHeader(sourceHeaders, name)
     if (value) headers.set(name, value)
   }
-  applyChatGptCodexIdentityHeaders(headers, bundle)
+  applyChatGptCodexIdentityHeaders(headers, bundle, sourceHeaders)
   headers.set('accept', 'text/event-stream')
   headers.set('content-type', 'application/json')
   headers.set('openai-beta', 'responses=experimental')
 }
 
-function applyChatGptCodexIdentityHeaders(headers: Headers, bundle: ChatGptCredentialBundle): void {
+export function applyChatGptCodexSearchHeaders(
+  headers: Headers,
+  bundle: ChatGptCredentialBundle,
+  sourceHeaders?: ChatGptSourceHeaders
+): void {
+  for (const name of CODEX_PASSTHROUGH_HEADERS) {
+    const value = readSourceHeader(sourceHeaders, name)
+    if (value) headers.set(name, value)
+  }
+  applyChatGptCodexIdentityHeaders(headers, bundle, sourceHeaders)
+  headers.set('accept', 'application/json')
+  headers.set('content-type', 'application/json')
+}
+
+function applyChatGptCodexIdentityHeaders(
+  headers: Headers,
+  bundle: ChatGptCredentialBundle,
+  sourceHeaders?: ChatGptSourceHeaders
+): void {
+  const clientVersion = resolveCodexClientVersion(sourceHeaders)
   headers.set('authorization', `Bearer ${bundle.accessToken}`)
   headers.set('chatgpt-account-id', bundle.accountId)
   headers.set('originator', 'codex_cli_rs')
-  headers.set('user-agent', CODEX_USER_AGENT)
-  headers.set('version', CODEX_CLIENT_VERSION)
+  headers.set('user-agent', `codex_cli_rs/${clientVersion} (Windows 11; x86_64)`)
+  headers.set('version', clientVersion)
 }
 
 function readSourceHeader(source: ChatGptSourceHeaders | undefined, name: string): string | undefined {
@@ -107,14 +137,36 @@ function readSourceHeader(source: ChatGptSourceHeaders | undefined, name: string
 }
 
 export function withChatGptCodexBody(body: Record<string, unknown>): Record<string, unknown> {
-  return {
+  const upstream: Record<string, unknown> = {
     ...body,
-    instructions: typeof body.instructions === 'string' && body.instructions.trim()
-      ? body.instructions
-      : 'You are Codex, a coding assistant.',
     store: false,
     stream: true
   }
+  if (isChatGptCodexResponsesLiteBody(body)) {
+    delete upstream.instructions
+    delete upstream.tools
+    return upstream
+  }
+  return {
+    ...upstream,
+    instructions: typeof body.instructions === 'string' && body.instructions.trim()
+      ? body.instructions
+      : 'You are Codex, a coding assistant.'
+  }
+}
+
+export function isChatGptCodexResponsesLiteBody(body: Record<string, unknown>): boolean {
+  if (!Array.isArray(body.input)) return false
+  return body.input.some((item) =>
+    Boolean(item && typeof item === 'object' && (item as Record<string, unknown>).type === 'additional_tools')
+  )
+}
+
+function resolveCodexClientVersion(sourceHeaders: ChatGptSourceHeaders | undefined): string {
+  const explicit = readSourceHeader(sourceHeaders, 'version')
+  if (explicit && CODEX_VERSION.test(explicit)) return explicit
+  const userAgent = readSourceHeader(sourceHeaders, 'user-agent')
+  return userAgent?.match(CODEX_USER_AGENT_VERSION)?.[1] ?? CODEX_CLIENT_VERSION
 }
 
 export async function probeChatGptAccount(
@@ -289,6 +341,7 @@ function isAbortOrTimeout(error: unknown): boolean {
 
 export function classifyChatGptCodexFailure(statusCode: number, headers?: HeadersInit, now = Date.now()): ProviderFailure {
   if (statusCode === 401) return { category: 'authentication', message: 'ChatGPT session access token was rejected.', retryable: true, accountAction: 'disable', statusCode }
+  if (statusCode === 402) return { category: 'quota', message: 'ChatGPT account quota is depleted or requires payment.', retryable: true, accountAction: 'disable', statusCode }
   if (statusCode === 403) return { category: 'permission', message: 'ChatGPT account is not permitted to use the Codex endpoint.', retryable: true, accountAction: 'disable', statusCode }
   if (statusCode === 429) {
     const retryAfterMs = parseRetryAfter(headers, now) ?? 30_000

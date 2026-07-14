@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   applyChatGptCodexHeaders,
+  applyChatGptCodexSearchHeaders,
   CHATGPT_CODEX_MODELS_URL,
   CHATGPT_CODEX_RESPONSES_URL,
+  CHATGPT_CODEX_SEARCH_URL,
   CHATGPT_CODEX_USAGE_URL,
   CODEX_CLIENT_VERSION,
   classifyChatGptCodexFailure,
+  isChatGptCodexResponsesLiteBody,
   probeChatGptAccount,
   queryChatGptCodexModels,
   queryChatGptCodexQuota,
@@ -28,7 +31,7 @@ describe('ChatGPT Codex provider path', () => {
 
     await refreshChatGptCredential(bundle, refreshFetch as typeof fetch)
 
-    expect(CODEX_CLIENT_VERSION).toBe('0.144.1')
+    expect(CODEX_CLIENT_VERSION).toBe('0.144.3')
     expect(new URL(CHATGPT_CODEX_MODELS_URL).searchParams.get('client_version')).toBe(CODEX_CLIENT_VERSION)
     expect(headers.get('user-agent')).toBe(`codex_cli_rs/${CODEX_CLIENT_VERSION} (Windows 11; x86_64)`)
     expect(headers.get('version')).toBe(CODEX_CLIENT_VERSION)
@@ -53,6 +56,55 @@ describe('ChatGPT Codex provider path', () => {
     expect(headers.get('authorization')).not.toContain('local-route-token')
     expect(headers.has('x-api-key')).toBe(false)
     expect(withChatGptCodexBody({ model: 'gpt-5' })).toMatchObject({ store: false, stream: true })
+  })
+
+  it('uses the standalone Codex Search contract with JSON headers and current client metadata', () => {
+    const headers = new Headers()
+    applyChatGptCodexSearchHeaders(headers, bundle, {
+      authorization: 'Bearer local-route-token',
+      'session-id': 'session-safe',
+      'thread-id': 'thread-safe',
+      'x-client-request-id': 'request-safe',
+      version: '0.145.2'
+    })
+
+    expect(CHATGPT_CODEX_SEARCH_URL).toBe('https://chatgpt.com/backend-api/codex/alpha/search')
+    expect(Object.fromEntries(headers)).toMatchObject({
+      accept: 'application/json',
+      authorization: 'Bearer access-private',
+      'chatgpt-account-id': 'acct-team',
+      'content-type': 'application/json',
+      originator: 'codex_cli_rs',
+      'session-id': 'session-safe',
+      'thread-id': 'thread-safe',
+      'x-client-request-id': 'request-safe',
+      version: '0.145.2'
+    })
+    expect(headers.get('user-agent')).toBe('codex_cli_rs/0.145.2 (Windows 11; x86_64)')
+    expect(headers.has('openai-beta')).toBe(false)
+    expect(headers.get('authorization')).not.toContain('local-route-token')
+  })
+
+  it('derives the Codex version from User-Agent and preserves the Responses Lite envelope', () => {
+    const headers = new Headers()
+    applyChatGptCodexHeaders(headers, bundle, {
+      'user-agent': 'codex_cli_rs/0.146.0 (Linux; x86_64)'
+    })
+    expect(headers.get('version')).toBe('0.146.0')
+
+    const liteBody = {
+      model: 'gpt-5.6',
+      instructions: 'top-level instructions must be omitted',
+      tools: [{ type: 'web_search' }],
+      input: [{ type: 'additional_tools', role: 'developer', tools: [] }]
+    }
+    expect(isChatGptCodexResponsesLiteBody(liteBody)).toBe(true)
+    expect(withChatGptCodexBody(liteBody)).toEqual({
+      model: 'gpt-5.6',
+      input: liteBody.input,
+      store: false,
+      stream: true
+    })
   })
 
   it('probes with a POST Responses request instead of Platform models', async () => {
@@ -123,6 +175,7 @@ describe('ChatGPT Codex provider path', () => {
 
   it('classifies Codex OAuth failures without API-key wording', () => {
     expect(classifyChatGptCodexFailure(401)).toMatchObject({ category: 'authentication', accountAction: 'disable', retryable: true })
+    expect(classifyChatGptCodexFailure(402)).toMatchObject({ category: 'quota', accountAction: 'disable', retryable: true })
     expect(classifyChatGptCodexFailure(403).message).toContain('ChatGPT account')
     expect(classifyChatGptCodexFailure(429, { 'retry-after': '2' }, 1_000)).toMatchObject({
       category: 'rate_limit', accountAction: 'cooldown', retryAfterMs: 2_000, retryAt: 3_000

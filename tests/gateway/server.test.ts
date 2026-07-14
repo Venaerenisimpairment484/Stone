@@ -206,6 +206,162 @@ describe('GatewayServer', () => {
     expect(JSON.parse(String(request.body))).toMatchObject({ store: false, stream: true })
   })
 
+  it('keeps Responses Lite and Search operations on one OAuth account and returns Search JSON directly', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.pools[0].strategy = 'round-robin'
+    gatewayConfig.pools[0].maxRetries = 0
+    gatewayConfig.accounts = gatewayConfig.accounts.map((item) => ({
+      ...item,
+      credentialType: 'chatgpt-oauth',
+      chatgptAccountId: `acct-${item.id}`
+    }))
+    const upstreamFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith('/responses')) {
+        return new Response(
+          'data: {"type":"response.completed","response":{"id":"resp_lite","object":"response","model":"source-model","status":"completed","output":[]}}\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+      }
+      const requestBody = JSON.parse(String(init?.body)) as { action: string; id: string }
+      return new Response(JSON.stringify({
+        id: requestBody.id,
+        action: requestBody.action,
+        data: [{ title: `${requestBody.action} result`, url: 'https://example.test/result' }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: (selected) => ({
+        secret: `oauth-${selected.id}-private`,
+        kind: 'chatgpt-oauth',
+        accountId: `acct-${selected.id}`
+      }),
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const commonHeaders = {
+      authorization: 'Bearer local-secret',
+      'content-type': 'application/json',
+      'session-id': 'session-web-run',
+      'thread-id': 'thread-web-run',
+      'x-client-request-id': 'request-web-run',
+      'x-codex-beta-features': 'responses_lite',
+      'x-codex-installation-id': 'install-web-run',
+      'x-codex-parent-thread-id': 'parent-web-run',
+      'x-codex-window-id': 'window-web-run',
+      'x-openai-internal-codex-responses-lite': 'true',
+      'x-openai-subagent': 'false',
+      version: '0.145.2'
+    }
+    const liteInput = [{ type: 'additional_tools', role: 'developer', tools: [] }]
+    const liteResponse = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: 'POST',
+      headers: commonHeaders,
+      body: JSON.stringify({
+        model: 'source-model',
+        input: liteInput,
+        instructions: 'omit this top-level field',
+        tools: [{ type: 'web_search' }],
+        stream: true
+      })
+    })
+    expect(liteResponse.status).toBe(200)
+    await liteResponse.text()
+
+    for (const action of ['search', 'open', 'find']) {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/alpha/search`, {
+        method: 'POST',
+        headers: commonHeaders,
+        body: JSON.stringify({ model: 'source-model', id: 'session-web-run', action, query: `${action} query` })
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        id: 'session-web-run',
+        action,
+        data: [{ title: `${action} result`, url: 'https://example.test/result' }]
+      })
+    }
+
+    expect(upstreamFetch).toHaveBeenCalledTimes(4)
+    expect(upstreamFetch.mock.calls.map((call) => call[0])).toEqual([
+      'https://chatgpt.com/backend-api/codex/responses',
+      'https://chatgpt.com/backend-api/codex/alpha/search',
+      'https://chatgpt.com/backend-api/codex/alpha/search',
+      'https://chatgpt.com/backend-api/codex/alpha/search'
+    ])
+    for (const call of upstreamFetch.mock.calls) {
+      expect(new Headers(call[1]?.headers).get('authorization')).toBe('Bearer oauth-first-private')
+    }
+    const liteRequest = upstreamFetch.mock.calls[0][1]!
+    const liteHeaders = new Headers(liteRequest.headers)
+    expect(Object.fromEntries(liteHeaders)).toMatchObject({
+      'session-id': 'session-web-run',
+      'thread-id': 'thread-web-run',
+      'x-client-request-id': 'request-web-run',
+      'x-codex-beta-features': 'responses_lite',
+      'x-codex-installation-id': 'install-web-run',
+      'x-codex-parent-thread-id': 'parent-web-run',
+      'x-codex-window-id': 'window-web-run',
+      'x-openai-internal-codex-responses-lite': 'true',
+      'x-openai-subagent': 'false',
+      version: '0.145.2'
+    })
+    expect(JSON.parse(String(liteRequest.body))).toEqual({
+      model: 'source-model',
+      input: liteInput,
+      stream: true,
+      store: false
+    })
+    const searchRequest = upstreamFetch.mock.calls[1][1]!
+    const searchHeaders = new Headers(searchRequest.headers)
+    expect(searchHeaders.get('accept')).toBe('application/json')
+    expect(searchHeaders.get('content-type')).toBe('application/json')
+    expect(searchHeaders.has('openai-beta')).toBe(false)
+    expect(JSON.parse(String(searchRequest.body))).toEqual({
+      model: 'source-model',
+      id: 'session-web-run',
+      action: 'search',
+      query: 'search query'
+    })
+  })
+
+  it('forwards standalone Search to the API-key provider endpoint', async () => {
+    const port = await freePort()
+    const gatewayConfig = config(port)
+    gatewayConfig.providers[0].protocol = 'openai-responses'
+    gatewayConfig.routes[0].inboundProtocol = 'openai-responses'
+    gatewayConfig.pools[0].protocol = 'openai-responses'
+    gatewayConfig.accounts[1].status = 'disabled'
+    const upstreamFetch = vi.fn(async () => new Response(JSON.stringify({
+      id: 'search-api-key',
+      data: [{ title: 'API key search result' }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const gateway = new GatewayServer({
+      config: gatewayConfig,
+      credentialResolver: () => 'provider-key',
+      fetchImplementation: upstreamFetch as typeof fetch
+    })
+    runningServers.push(gateway)
+    await gateway.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/alpha/search`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'source-model', id: 'search-api-key', action: 'search', query: 'Stone' })
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ id: 'search-api-key', data: [{ title: 'API key search result' }] })
+    expect(upstreamFetch.mock.calls[0][0]).toBe('https://api.example.test/v1/alpha/search')
+    expect(new Headers(upstreamFetch.mock.calls[0][1]?.headers).get('authorization')).toBe('Bearer provider-key')
+  })
+
   it('uses one pool-scoped transport for OAuth refresh resolution and generation', async () => {
     const port = await freePort()
     const gatewayConfig = config(port)

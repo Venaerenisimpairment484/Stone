@@ -5,8 +5,11 @@ import {
   extractRateLimitSignals,
   getProviderAdapter,
   applyChatGptCodexHeaders,
+  applyChatGptCodexSearchHeaders,
   CHATGPT_CODEX_RESPONSES_URL,
+  CHATGPT_CODEX_SEARCH_URL,
   classifyChatGptCodexFailure,
+  isChatGptCodexResponsesLiteBody,
   withChatGptCodexBody,
   type NormalizedTokenUsage,
   type NormalizedQuotaSignals,
@@ -57,6 +60,7 @@ type JsonObject = Record<string, unknown>
 
 interface IncomingRoute {
   protocol: Protocol
+  operation: 'generate' | 'codex-search'
   geminiMethod?: 'generateContent' | 'streamGenerateContent'
 }
 
@@ -195,6 +199,10 @@ export class GatewayServer implements GatewayController {
       const body = await readJsonBody(request)
       model = getRequestModel(incoming.protocol, body, pathname)
       if (!model) throw new GatewayHttpError(400, 'A model is required')
+      const codexSearch = incoming.operation === 'codex-search'
+      if (codexSearch && (typeof body.id !== 'string' || !body.id.trim())) {
+        throw new GatewayHttpError(400, 'A search session id is required')
+      }
 
       const pool = this.config.pools.find((candidate) => candidate.id === logRoute?.poolId)
       if (!pool) throw new GatewayHttpError(503, 'The matched route has no available pool')
@@ -203,7 +211,11 @@ export class GatewayServer implements GatewayController {
       )
       const sessionId = getSessionId(request, body)
       const targetModel = logRoute.modelMap[model] ?? model
-      const streaming = body.stream === true || incoming.geminiMethod === 'streamGenerateContent'
+      const streaming = !codexSearch && (body.stream === true || incoming.geminiMethod === 'streamGenerateContent')
+      const responsesLite = incoming.protocol === 'openai-responses' && isChatGptCodexResponsesLiteBody(body)
+      const schedulingPool = sessionId && (codexSearch || responsesLite)
+        ? { ...pool, stickySessions: true }
+        : pool
       const retryLimit = Number.isFinite(pool.maxRetries) ? Math.max(0, Math.floor(pool.maxRetries)) : 0
       let lastRetryableError: GatewayHttpError | undefined
 
@@ -214,7 +226,12 @@ export class GatewayServer implements GatewayController {
         try {
           let scheduled
           try {
-            scheduled = this.scheduler.selectAndAcquire({ pool, accounts: providerAccounts, model: targetModel, sessionId })
+            scheduled = this.scheduler.selectAndAcquire({
+              pool: schedulingPool,
+              accounts: providerAccounts,
+              model: targetModel,
+              sessionId
+            })
           } catch (error) {
             if (error instanceof NoEligibleAccountError && lastRetryableError) throw lastRetryableError
             throw error
@@ -227,7 +244,12 @@ export class GatewayServer implements GatewayController {
           const provider = this.config.providers.find((candidate) => candidate.id === account.providerId)
           if (!provider) throw new GatewayHttpError(503, 'The selected account has no provider', 'account_unavailable')
           const adapter = getProviderAdapter(provider.kind)
-          const outbound = convertRequest(incoming.protocol, provider.protocol, body, targetModel)
+          if (codexSearch && provider.protocol !== 'openai-responses') {
+            throw new GatewayHttpError(400, 'Standalone web search requires an OpenAI Responses provider', 'unsupported_conversion')
+          }
+          const convertedBody = codexSearch
+            ? { ...body, model: targetModel }
+            : convertRequest(incoming.protocol, provider.protocol, body, targetModel).body
           const outboundFetch = this.outboundFetchResolver?.(account, pool) ?? this.fetchImplementation
           const resolvedValue = await this.credentialResolver(account, outboundFetch)
           if (!resolvedValue) {
@@ -243,12 +265,17 @@ export class GatewayServer implements GatewayController {
             if (provider.protocol !== 'openai-responses' || !resolvedCredential.accountId) {
               throw new GatewayHttpError(503, 'ChatGPT account requires an OpenAI Responses provider', 'account_unavailable')
             }
-            applyChatGptCodexHeaders(upstreamHeaders, {
+            const credentialBundle = {
               accessToken: credential,
               accountId: resolvedCredential.accountId,
               expiresAt: account.credentialExpiresAt ?? Number.MAX_SAFE_INTEGER
-            }, request.headers)
-            if (sessionId && !upstreamHeaders.has('session_id')) upstreamHeaders.set('session_id', sessionId)
+            }
+            if (codexSearch) {
+              applyChatGptCodexSearchHeaders(upstreamHeaders, credentialBundle, request.headers)
+            } else {
+              applyChatGptCodexHeaders(upstreamHeaders, credentialBundle, request.headers)
+            }
+            if (sessionId && !upstreamHeaders.has('session-id')) upstreamHeaders.set('session-id', sessionId)
           } else {
             adapter.applyRequestHeaders(upstreamHeaders, {
               protocol: provider.protocol,
@@ -258,17 +285,21 @@ export class GatewayServer implements GatewayController {
               hasBody: true
             })
           }
-          const outboundBody = withStreamingFlag(outbound.body, provider.protocol, streaming)
-          const upstreamBody = resolvedCredential.kind === 'chatgpt-oauth'
+          const outboundBody = codexSearch
+            ? convertedBody
+            : withStreamingFlag(convertedBody, provider.protocol, streaming)
+          const upstreamBody = resolvedCredential.kind === 'chatgpt-oauth' && !codexSearch
             ? withChatGptCodexBody(outboundBody)
             : outboundBody
           let upstreamResponse: Response
           try {
             upstreamResponse = await outboundFetch(
-              resolvedCredential.kind === 'chatgpt-oauth' ? CHATGPT_CODEX_RESPONSES_URL : adapter.buildEndpoint({
+              resolvedCredential.kind === 'chatgpt-oauth'
+                ? codexSearch ? CHATGPT_CODEX_SEARCH_URL : CHATGPT_CODEX_RESPONSES_URL
+                : adapter.buildEndpoint({
                 baseUrl: provider.baseUrl,
                 protocol: provider.protocol,
-                operation: 'generate',
+                operation: codexSearch ? 'search' : 'generate',
                 model: targetModel,
                 stream: streaming
               }),
@@ -294,7 +325,7 @@ export class GatewayServer implements GatewayController {
 
           if (!upstreamResponse.ok) {
             const payload = await readUpstreamJson(upstreamResponse)
-            const safePayload = sanitizeUpstreamPayload(payload, credential)
+            const safePayload = sanitizeUpstreamPayload(payload, sensitiveValues(resolvedCredential))
             const providerFailure = resolvedCredential.kind === 'chatgpt-oauth'
               ? classifyChatGptCodexFailure(upstreamResponse.status, upstreamResponse.headers, this.now())
               : adapter.classifyFailure({
@@ -312,6 +343,26 @@ export class GatewayServer implements GatewayController {
               providerFailure,
               observedQuotaSignals(headerSignals, this.now())
             )
+          }
+
+          if (codexSearch) {
+            const payload = sanitizeUpstreamPayload(
+              await readUpstreamJson(upstreamResponse),
+              sensitiveValues(resolvedCredential)
+            )
+            this.writeJson(response, upstreamResponse.status, payload)
+            this.reportAccountSuccess(account, attemptStarted, headerSignals)
+            this.successRequests += 1
+            this.emitLog(this.makeLog({
+              route: logRoute,
+              account,
+              model,
+              started,
+              status: 'success',
+              statusCode: upstreamResponse.status,
+              failoverCount
+            }))
+            return
           }
 
           if (streaming) {
@@ -570,11 +621,16 @@ class GatewayHttpError extends Error {
 }
 
 function classifyIncomingRoute(pathname: string): IncomingRoute | undefined {
-  if (pathname === '/v1/messages') return { protocol: 'anthropic-messages' }
-  if (pathname === '/v1/responses') return { protocol: 'openai-responses' }
-  if (pathname === '/v1/chat/completions') return { protocol: 'openai-chat' }
-  if (/^\/v1beta\/models\/[^/]+:generateContent$/.test(pathname)) return { protocol: 'gemini', geminiMethod: 'generateContent' }
-  if (/^\/v1beta\/models\/[^/]+:streamGenerateContent$/.test(pathname)) return { protocol: 'gemini', geminiMethod: 'streamGenerateContent' }
+  if (pathname === '/v1/messages') return { protocol: 'anthropic-messages', operation: 'generate' }
+  if (pathname === '/v1/responses') return { protocol: 'openai-responses', operation: 'generate' }
+  if (pathname === '/v1/alpha/search') return { protocol: 'openai-responses', operation: 'codex-search' }
+  if (pathname === '/v1/chat/completions') return { protocol: 'openai-chat', operation: 'generate' }
+  if (/^\/v1beta\/models\/[^/]+:generateContent$/.test(pathname)) {
+    return { protocol: 'gemini', operation: 'generate', geminiMethod: 'generateContent' }
+  }
+  if (/^\/v1beta\/models\/[^/]+:streamGenerateContent$/.test(pathname)) {
+    return { protocol: 'gemini', operation: 'generate', geminiMethod: 'streamGenerateContent' }
+  }
   return undefined
 }
 
@@ -911,11 +967,22 @@ async function waitForDrain(response: ServerResponse): Promise<void> {
 }
 
 function getSessionId(request: IncomingMessage, body: JsonObject): string | undefined {
-  const header = request.headers['x-stone-session-id']
-  if (typeof header === 'string' && header) return header
+  const headerNames = ['x-stone-session-id', 'session-id', 'session_id', 'thread-id'] as const
+  for (const name of headerNames) {
+    const value = request.headers[name]
+    const first = Array.isArray(value) ? value[0] : value
+    if (typeof first === 'string' && first.trim()) return first.trim()
+  }
+  const clientMetadata = objectValue(body.client_metadata)
   const metadata = objectValue(body.metadata)
-  const direct = metadata?.session_id ?? metadata?.sessionId
-  return typeof direct === 'string' && direct ? direct : undefined
+  const candidates = [
+    clientMetadata?.session_id,
+    clientMetadata?.thread_id,
+    metadata?.session_id,
+    metadata?.sessionId,
+    body.id
+  ]
+  return candidates.find((value): value is string => typeof value === 'string' && Boolean(value.trim()))?.trim()
 }
 
 function readLocalToken(request: IncomingMessage): string | undefined {
@@ -962,11 +1029,11 @@ function upstreamErrorMessage(payload: JsonObject): string {
 
 const sensitiveErrorField = /^(?:api[-_]?key|authorization|access[-_]?token|refresh[-_]?token|token|credential|secret|password)$/i
 
-function sanitizeUpstreamPayload(payload: JsonObject, credential: string): JsonObject {
+function sanitizeUpstreamPayload(payload: JsonObject, secrets: readonly string[]): JsonObject {
   try {
     const serialized = JSON.stringify(payload, (key, value: unknown) => {
       if (key && sensitiveErrorField.test(key)) return '[REDACTED]'
-      if (typeof value === 'string') return redactCredentialText(value, credential)
+      if (typeof value === 'string') return redactSensitiveText(value, secrets)
       return value
     })
     return objectValue(JSON.parse(serialized) as unknown)
@@ -974,10 +1041,6 @@ function sanitizeUpstreamPayload(payload: JsonObject, credential: string): JsonO
   } catch {
     return { error: { message: 'Upstream request failed' } }
   }
-}
-
-function redactCredentialText(value: string, credential: string): string {
-  return redactSensitiveText(value, [credential])
 }
 
 function redactSensitiveText(value: string, secrets: readonly string[]): string {

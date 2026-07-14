@@ -159,7 +159,7 @@ describe('ClientConfigService editor workflow', () => {
       cli_auth_credentials_store: 'file',
       model_providers: {
         stone: {
-          name: 'Stone',
+          name: 'OpenAI',
           base_url: 'http://127.0.0.1:15721/v1',
           wire_api: 'responses',
           requires_openai_auth: true,

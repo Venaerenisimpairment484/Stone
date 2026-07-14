@@ -28,6 +28,12 @@ describe('provider adapter endpoints', () => {
       protocol: 'openai-chat',
       operation: 'generate'
     })).toBe('https://gateway.example.test/api/v1/chat/completions?tenant=stone')
+
+    expect(openAIAdapter.buildEndpoint({
+      baseUrl: 'https://api.openai.com/v1',
+      protocol: 'openai-responses',
+      operation: 'search'
+    })).toBe('https://api.openai.com/v1/alpha/search')
   })
 
   it('builds Anthropic-compatible endpoints without duplicating v1', () => {

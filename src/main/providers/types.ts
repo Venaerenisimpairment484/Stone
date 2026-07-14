@@ -1,6 +1,6 @@
 import type { Protocol, ProviderKind } from '../../shared/types'
 
-export type ProviderEndpointOperation = 'generate' | 'models' | 'health'
+export type ProviderEndpointOperation = 'generate' | 'search' | 'models' | 'health'
 
 export interface ProviderEndpointInput {
   baseUrl: string

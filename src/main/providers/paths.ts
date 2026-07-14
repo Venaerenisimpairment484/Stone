@@ -5,6 +5,12 @@ export function protocolOperationPath(input: ProviderEndpointInput): {
   query?: Readonly<Record<string, string>>
 } {
   if (input.operation === 'models' || input.operation === 'health') return { path: 'models' }
+  if (input.operation === 'search') {
+    if (input.protocol !== 'openai-responses') {
+      throw new Error('Standalone web search requires an OpenAI Responses provider endpoint')
+    }
+    return { path: 'alpha/search' }
+  }
 
   switch (input.protocol) {
     case 'openai-responses':

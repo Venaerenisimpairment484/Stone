@@ -317,7 +317,7 @@ export function planCodexToml(content: string | undefined, baseUrl: string): Tex
   setTopLevel(lines, { key: 'model_provider', value: 'stone' })
   setTopLevel(lines, { key: 'cli_auth_credentials_store', value: 'file' })
   setSection(lines, ['model_providers', 'stone'], [
-    { key: 'name', value: 'Stone' },
+    { key: 'name', value: 'OpenAI' },
     { key: 'base_url', value: baseUrl },
     { key: 'wire_api', value: 'responses' },
     { key: 'requires_openai_auth', value: true },

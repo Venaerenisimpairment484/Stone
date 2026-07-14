@@ -30,8 +30,10 @@ export { classifyProviderFailure, parseRetryAfter } from './failure'
 export { getProviderPreset, providerPresets } from './presets'
 export {
   applyChatGptCodexHeaders,
+  applyChatGptCodexSearchHeaders,
   CHATGPT_CODEX_MODELS_URL,
   CHATGPT_CODEX_RESPONSES_URL,
+  CHATGPT_CODEX_SEARCH_URL,
   CHATGPT_CODEX_USAGE_URL,
   CODEX_CLIENT_VERSION,
   classifyChatGptCodexFailure,
@@ -40,6 +42,7 @@ export {
   queryChatGptCodexQuota,
   refreshChatGptCredential,
   resolveChatGptCredential,
+  isChatGptCodexResponsesLiteBody,
   withChatGptCodexBody
 } from './chatgpt-codex'
 export {
